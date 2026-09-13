@@ -201,6 +201,7 @@ async def apply_all_changes_handler(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("text_transform_"))
 async def show_text_transform_menu(callback: CallbackQuery, session_name: str = None):
     user_id = callback.from_user.id
+    print(0)
 
     # БЕЗОПАСНО: если имя не передано вручную, отрезаем префикс "text_transform_"
     if not session_name:
