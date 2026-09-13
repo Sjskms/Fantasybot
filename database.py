@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 import json
 
 class Database:
-    DB_NAME = 'db.db'
+    DB_NAME = 'data/db.db'
     _fernet = None 
     _is_initialized = False
     
