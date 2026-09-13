@@ -236,8 +236,8 @@ async def show_text_transform_menu(callback: CallbackQuery, state: FSMContext = 
         if raw_custom:
             # Экранируем спецсимволы (<, >, &)
             safe_text = html.escape(raw_custom)
-            if len(safe_text) > 120:
-                safe_text = safe_text[:120] + "..."
+            if len(safe_text) > 200:
+                safe_text = safe_text[:200] + "..."
             custom_preview = f"<code>{safe_text}</code>"
         else:
             custom_preview = "<i>(не задан)</i>"
