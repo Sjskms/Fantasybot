@@ -1,0 +1,197 @@
+# keyboards/session_kb.py
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from typing import Any, Dict, List, Set
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from services.Additional_Feature import has_session_unapplied_changes
+from database import Database
+db = Database() 
+
+# Кнопка отмены для FSM
+cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="⚙️ Отмена", callback_data="cans")]
+])
+
+def get_session_settings_keyboard(sessions: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    buttons = []
+    if sessions:
+        for session_name, _ in sessions:
+            buttons.append([InlineKeyboardButton(text=session_name, callback_data=f"select_session_{session_name}")])
+
+    buttons.append([InlineKeyboardButton(text="➕ Добавить новую сессию", callback_data="add_new_session")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в меню", callback_data="main_menu")])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+skip_password_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Пропустить (у меня нет 2FA)", callback_data="skip_2fa_password")]
+])
+
+
+
+def get_session_management_keyboard(session_name: str, enable_posting: bool) -> InlineKeyboardMarkup:
+    toggle_button_text = "🔀 Выключить пересылку" if enable_posting else "▶️ Включить пересылку"
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚙️ Настройки каналов", callback_data=f"session_config2_{session_name}")],
+        [InlineKeyboardButton(text="✏️ Текст и ссылки (HTML)", callback_data=f"text_transform_{session_name}")], 
+        [InlineKeyboardButton(text=toggle_button_text, callback_data=f"toggle_posting_{session_name}")],
+        [InlineKeyboardButton(text="📜 Настройки логов", callback_data=f"session_logging_{session_name}")],
+        [InlineKeyboardButton(text="❌ Удалить сессию", callback_data=f"delete_session_{session_name}")],
+        [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="session_settings")]
+    ])
+    
+    
+    
+
+def _build_filter_limits_keyboard(chat_id: int, filter_key: str):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✏️ Изменить МИН", callback_data=f"set_limit_{chat_id}_{filter_key}_min")
+    builder.button(text="✏️ Изменить МАКС", callback_data=f"set_limit_{chat_id}_{filter_key}_max")
+    builder.button(text="⬅️ Назад к каналу", callback_data=f"config_channel_{chat_id}")
+    builder.adjust(2, 1)
+    return builder.as_markup()              
+    
+    
+    
+CONTENT_TYPES = {
+    "photos": "Фото",
+    "videos": "Видео",
+    "text": "Текст",
+    "documents": "Файлы",
+    "music": "Музыка",
+    "voices": "Голосовые",
+    "video_notes": "Кружки"
+}
+    
+def _build_channel_settings_keyboard(chat_id: int, session_name: str, mode: str, channel_mode_config: dict):
+    builder = InlineKeyboardBuilder()
+    filters = channel_mode_config.get("filters", {})
+
+    for filter_key, title in CONTENT_TYPES.items():
+        filter_val = filters.get(filter_key, {})
+        
+        if isinstance(filter_val, dict):
+            is_enabled = filter_val.get("enabled", True)
+            min_val = filter_val.get("min", 0)
+            max_val = filter_val.get("max", 999999)
+        else:
+            is_enabled = bool(filter_val)
+            min_val, max_val = 0, 999999
+
+        status_icon = "✅" if is_enabled else "❌"
+        
+        # Кнопка 1: Вкл/Выкл
+        builder.button(
+            text=f"{status_icon} {title}",
+            callback_data=f"toggle_filter_{chat_id}_{filter_key}"
+        )
+        # Кнопка 2: Настройки Min/Max
+        builder.button(
+            text=f"⚙️ {min_val} - {max_val}",
+            callback_data=f"edit_limits_{chat_id}_{filter_key}"
+        )
+
+    builder.adjust(2)
+
+    # Всегда обычная кнопка возврата к списку каналов
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=f"list_{mode}_{session_name}"
+        )
+    )
+    return builder.as_markup()
+    
+    
+    
+
+
+
+
+
+async def _build_channels_keyboard(
+    cached_channels: list,
+    selected_channels_ids: set,
+    session_name: str,
+    mode: str,
+    user_id: int,
+    session_configs: dict
+):
+    builder = InlineKeyboardBuilder()
+    row_sizes = []
+
+    for ch in cached_channels:
+        ch_id = ch["id"]
+        is_selected = ch_id in selected_channels_ids
+        title = ch.get("title", f"Канал {ch_id}")
+
+        if mode == "export":
+            if is_selected:
+                # ВЫБРАН: [ Название ] [ ❌ ] [ ⚙️ ]
+                builder.button(text=title, callback_data=f"toggle_select_{ch_id}")
+                builder.button(text="❌", callback_data=f"toggle_select_{ch_id}")
+                builder.button(text="⚙️", callback_data=f"config_channel_{ch_id}")
+                row_sizes.append(3)
+            else:
+                # НЕ ВЫБРАН: [ Название ] [ ✅ Выбрать ]
+                builder.button(text=title, callback_data=f"toggle_select_{ch_id}")
+                builder.button(text="✅ Выбрать", callback_data=f"toggle_select_{ch_id}")
+                row_sizes.append(2)
+
+        else:
+            # Режим POST: всегда 2 кнопки без настроек
+            status_text = "❌" if is_selected else "✅ Выбрать"
+            builder.button(text=title, callback_data=f"toggle_select_{ch_id}")
+            builder.button(text=status_text, callback_data=f"toggle_select_{ch_id}")
+            row_sizes.append(2)
+
+    # Применяем динамическую разметку строк
+    if row_sizes:
+        builder.adjust(*row_sizes)
+
+    # Кнопка сохранения и перезапуска при наличии изменений
+    is_posting_active = await Database.get_session_posting_status(user_id, session_name)
+    has_changes = is_posting_active and has_session_unapplied_changes(user_id, session_name, session_configs)
+
+    if has_changes:
+        builder.row(
+            InlineKeyboardButton(
+                text="💾 Сохранить изменения и перезапустить",
+                callback_data=f"apply_all_changes_{session_name}"
+            )
+        )
+
+    # Кнопка возврата в меню сессии
+    builder.row(
+        InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"session_config2_{session_name}"
+        )
+    )
+    return builder.as_markup()
+    
+    
+
+def get_logging_settings_keyboard(session_name: str, log_config: dict) -> InlineKeyboardMarkup:
+    """
+    Генерирует клавиатуру с тумблерами для параметров логирования.
+    """
+    is_enabled = log_config.get("enabled", True)
+    log_success = log_config.get("log_success", True)
+    log_filtered = log_config.get("log_filtered", False)
+    log_errors = log_config.get("log_errors", True)
+
+    main_icon = "✅" if is_enabled else "❌"
+    success_icon = "✅" if log_success else "❌"
+    filtered_icon = "✅" if log_filtered else "❌"
+    errors_icon = "✅" if log_errors else "❌"
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{main_icon} Логирование: {'ВКЛ' if is_enabled else 'ВЫКЛ'}", callback_data=f"toggle_log_{session_name}_main")],
+        [InlineKeyboardButton(text=f"{success_icon} Успешные пересылки", callback_data=f"toggle_log_{session_name}_success")],
+        [InlineKeyboardButton(text=f"{filtered_icon} Отфильтрованные посты", callback_data=f"toggle_log_{session_name}_filtered")],
+        [InlineKeyboardButton(text=f"{errors_icon} Ошибки пересылки", callback_data=f"toggle_log_{session_name}_errors")],
+        [InlineKeyboardButton(text="⬅️ Назад к сессии", callback_data=f"select_session_{session_name}")]
+    ])
+    
