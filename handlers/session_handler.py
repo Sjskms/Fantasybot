@@ -128,10 +128,8 @@ def get_text_transform_keyboard(session_name: str, transform_config: dict) -> In
         [InlineKeyboardButton(text="🔄 Добавить замену слова", callback_data=f"tt_addword_{session_name}")],
         [InlineKeyboardButton(text="🔗 Добавить замену ссылки", callback_data=f"tt_addlink_{session_name}")],
         [InlineKeyboardButton(text="🗑 Очистить все замены", callback_data=f"tt_clear_{session_name}")],
-        # Возврат к меню управления конкретной сессией
-        [InlineKeyboardButton(text="⬅️ Назад к сессии", callback_data=f"select_session_{session_name}")]
+        [InlineKeyboardButton(text="⬅️ Назад к сессии", callback_data=f"manage_session_{session_name}")]
     ])
-
 
 
 
@@ -198,51 +196,71 @@ async def apply_all_changes_handler(callback: CallbackQuery, state: FSMContext):
 
 
 
-@router.callback_query(F.data.startswith("text_transform_"))
-async def show_text_transform_menu(callback: CallbackQuery, session_name: str = None):
-    user_id = callback.from_user.id
-    print(0)
 
-    # БЕЗОПАСНО: если имя не передано вручную, отрезаем префикс "text_transform_"
+@router.callback_query(F.data.startswith("text_transform_"))
+async def show_text_transform_menu(callback: CallbackQuery, state: FSMContext = None, session_name: str = None):
+    # 1. Если был в режиме ожидания ввода текста/слов — сбрасываем состояние
+    if state:
+        await state.set_state(None)
+
+    user_id = callback.from_user.id
+
+    # 2. Надежно извлекаем session_name
     if not session_name:
         session_name = callback.data.removeprefix("text_transform_")
 
-    session_configs = await Database.get_session_configs(user_id, session_name)
-    tt_cfg = session_configs.get("text_transform", {
-        "mode": "keep",
-        "custom_text": "",
-        "replace_words": [],
-        "replace_links": []
-    })
-
-    mode_names = {
-        "keep": "Только замена слов/ссылок",
-        "append": "Добавление в конец",
-        "prepend": "Добавление в начало",
-        "replace": "Полная замена текста"
-    }
-
-    words_count = len(tt_cfg.get("replace_words", []))
-    links_count = len(tt_cfg.get("replace_links", []))
-    custom_preview = tt_cfg.get("custom_text") or "<i>(не задан)</i>"
-    if len(custom_preview) > 100:
-        custom_preview = custom_preview[:100] + "..."
-
-    text = (
-        f"✏️ <b>Настройки текста и ссылок:</b> <code>{session_name}</code>\n\n"
-        f"🔹 <b>Режим вставки:</b> {mode_names.get(tt_cfg.get('mode', 'keep'))}\n"
-        f"🔹 <b>Правил замены слов:</b> {words_count}\n"
-        f"🔹 <b>Правил замены ссылок:</b> {links_count}\n\n"
-        f"📝 <b>Текущий кастомный текст:</b>\n{custom_preview}\n\n"
-        "Выберите действие ниже:"
-    )
-
-    keyboard = get_text_transform_keyboard(session_name, tt_cfg)
     try:
+        # 3. Защита от None из базы
+        session_configs = await Database.get_session_configs(user_id, session_name)
+        if not session_configs or not isinstance(session_configs, dict):
+            session_configs = {}
+
+        tt_cfg = session_configs.get("text_transform", {})
+        if not isinstance(tt_cfg, dict):
+            tt_cfg = {}
+
+        mode_names = {
+            "keep": "Только замена слов/ссылок",
+            "append": "Добавление в конец",
+            "prepend": "Добавление в начало",
+            "replace": "Полная замена текста"
+        }
+
+        current_mode = tt_cfg.get("mode", "keep")
+        words_count = len(tt_cfg.get("replace_words", []))
+        links_count = len(tt_cfg.get("replace_links", []))
+        
+        # 4. БЕЗОПАСНЫЙ ПРЕДПРОСМОТР: экранируем HTML, чтобы Telegram не падал
+        raw_custom = tt_cfg.get("custom_text", "").strip()
+        if raw_custom:
+            # Экранируем спецсимволы (<, >, &)
+            safe_text = html.escape(raw_custom)
+            if len(safe_text) > 120:
+                safe_text = safe_text[:120] + "..."
+            custom_preview = f"<code>{safe_text}</code>"
+        else:
+            custom_preview = "<i>(не задан)</i>"
+
+        text = (
+            f"✏️ <b>Настройки текста и ссылок:</b> <code>{session_name}</code>\n\n"
+            f"🔹 <b>Режим вставки:</b> {mode_names.get(current_mode, 'Не выбран')}\n"
+            f"🔹 <b>Правил замены слов:</b> {words_count}\n"
+            f"🔹 <b>Правил замены ссылок:</b> {links_count}\n\n"
+            f"📝 <b>Текущий кастомный текст:</b>\n{custom_preview}\n\n"
+            "Выберите действие ниже:"
+        )
+
+        keyboard = get_text_transform_keyboard(session_name, tt_cfg)
+        
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    except TelegramBadRequest:
-        pass
-    await callback.answer()
+
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            logging.error(f"Ошибка Telegram при открытии меню текста: {e}")
+    except Exception as e:
+        logging.exception(f"Критическая ошибка в show_text_transform_menu: {e}")
+    finally:
+        await callback.answer()
 
 
 # Переключение режима (append / prepend / replace / keep)
@@ -316,17 +334,43 @@ async def process_custom_text(message: Message, state: FSMContext):
     if "text_transform" not in configs:
         configs["text_transform"] = {}
     
+    # Сохраняем введенный HTML-текст
     configs["text_transform"]["custom_text"] = message.text or message.caption or ""
     
     await Database.update_session_configs(user_id, session_name, configs)
     await update_live_config(user_id, session_name)
     await state.set_state(None)
 
-    # Кнопка для быстрого возврата в настройки текста
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚙️ К настройкам текста", callback_data=f"text_transform_{session_name}")]
-    ])
-    await message.answer("✅ Кастомный текст успешно сохранен!", reply_markup=kb)
+    # Загружаем обновленную конфигурацию
+    tt_cfg = configs.get("text_transform", {})
+
+    mode_names = {
+        "keep": "Только замена слов/ссылок",
+        "append": "Добавление в конец",
+        "prepend": "Добавление в начало",
+        "replace": "Полная замена текста"
+    }
+
+    words_count = len(tt_cfg.get("replace_words", []))
+    links_count = len(tt_cfg.get("replace_links", []))
+    custom_preview = tt_cfg.get("custom_text") or "<i>(не задан)</i>"
+    if len(custom_preview) > 100:
+        custom_preview = custom_preview[:100] + "..."
+
+    text = (
+        f"✅ <b>Кастомный текст успешно сохранен!</b>\n\n"
+        f"✏️ <b>Настройки текста и ссылок:</b> <code>{session_name}</code>\n\n"
+        f"🔹 <b>Режим вставки:</b> {mode_names.get(tt_cfg.get('mode', 'keep'))}\n"
+        f"🔹 <b>Правил замены слов:</b> {words_count}\n"
+        f"🔹 <b>Правил замены ссылок:</b> {links_count}\n\n"
+        f"📝 <b>Текущий кастомный текст:</b>\n{custom_preview}\n\n"
+        "Выберите действие ниже:"
+    )
+
+    # Получаем полные кнопки меню настроек
+    keyboard = get_text_transform_keyboard(session_name, tt_cfg)
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 # --- 2. Добавить замену слова ---
