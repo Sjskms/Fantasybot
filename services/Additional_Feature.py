@@ -26,7 +26,51 @@ restart_timers: dict[tuple[int, str], asyncio.TimerHandle] = {}
 
 bot_instance = None
 
+def get_enabled_export_channels(channels_config: dict) -> dict[int, dict]:
+    """
+    Возвращает все активные каналы экспорта:
+    {
+        chat_id: export_mode_config
+    }
+    """
+    result = {}
 
+    for chat_id_raw, channel_data in channels_config.items():
+        try:
+            chat_id = int(chat_id_raw)
+        except (TypeError, ValueError):
+            logging.error("Некорректный ID канала в конфиге: %r", chat_id_raw)
+            continue
+
+        modes = channel_data.get("modes", {})
+        export_mode = modes.get("export", {})
+
+        if isinstance(export_mode, dict) and export_mode.get("enabled", False):
+            result[chat_id] = export_mode
+
+    return result
+
+
+def get_enabled_post_channels(channels_config: dict) -> list[int]:
+    """Возвращает все активные каналы постинга."""
+    result = []
+
+    for chat_id_raw, channel_data in channels_config.items():
+        try:
+            chat_id = int(chat_id_raw)
+        except (TypeError, ValueError):
+            continue
+
+        modes = channel_data.get("modes", {})
+        post_mode = modes.get("post", {})
+
+        if isinstance(post_mode, dict) and post_mode.get("enabled", False):
+            result.append(chat_id)
+
+    return result
+    
+    
+    
 def set_bot_instance(bot):
     """Инициализация объекта бота для логов."""
     global bot_instance
@@ -183,103 +227,137 @@ def is_message_allowed(message: Message, export_filters: dict) -> bool:
     return True
 
 
-async def forward_album_delayed(media_group_id: str, client: Client, user_id: int, session_configs: dict):
-    """Сборка и отправка альбома во все выбранные целевые каналы постинга."""
+async def forward_album_delayed(
+    buffer_key: str,
+    client: Client,
+    user_id: int,
+    session_configs: dict
+):
     await asyncio.sleep(1.5)
-    buf = media_group_buffers.pop(media_group_id, None)
+
+    buf = media_group_buffers.pop(buffer_key, None)
     if not buf:
         return
 
-    messages: list[Message] = buf["messages"]
-    target_chats: list[int] = buf.get("target_chats", [])
+    messages = buf["messages"]
+    target_chats = buf.get("target_chats", [])
     transform_config = buf.get("transform_config", {})
+    source_chat = buf.get("source_chat")
 
     if not target_chats:
+        logging.warning(
+            "Для альбома %s нет каналов назначения",
+            buffer_key
+        )
         return
 
-    try:
-        messages.sort(key=lambda m: m.id)
-        source_chat = messages[0].chat.id
+    messages.sort(key=lambda item: item.id)
 
-        for target_chat_id in target_chats:
-            try:
-                if not is_transform_needed(transform_config):
-                    message_ids = [m.id for m in messages]
-                    await client.copy_media_group(
-                        chat_id=target_chat_id,
-                        from_chat_id=source_chat,
-                        message_id=message_ids[0]
+    for target_chat_id in target_chats:
+        try:
+            if not is_transform_needed(transform_config):
+                await client.copy_media_group(
+                    chat_id=target_chat_id,
+                    from_chat_id=source_chat,
+                    message_id=messages[0].id
+                )
+            else:
+                orig_caption_html = ""
+
+                for msg in messages:
+                    caption_html = (
+                        getattr(msg.caption, "html", None)
+                        or msg.caption
+                        or ""
                     )
-                else:
-                    orig_caption_html = ""
-                    for msg in messages:
-                        cap = getattr(msg.caption, "html", None) or msg.caption or ""
-                        if cap:
-                            orig_caption_html = cap
-                            break
 
-                    final_caption = transform_text(orig_caption_html, transform_config, is_media=True)
-                    input_media_list = []
+                    if caption_html:
+                        orig_caption_html = caption_html
+                        break
 
-                    for idx, msg in enumerate(messages):
-                        item_caption = final_caption if idx == 0 else ""
-                        parse_mode = ParseMode.HTML if idx == 0 and item_caption else None
+                final_caption = transform_text(
+                    orig_caption_html,
+                    transform_config,
+                    is_media=True
+                )
 
-                        if msg.photo:
-                            input_media_list.append(
-                                InputMediaPhoto(
-                                    media=msg.photo.file_id,
-                                    caption=item_caption,
-                                    parse_mode=parse_mode
-                                )
-                            )
-                        elif msg.video:
-                            input_media_list.append(
-                                InputMediaVideo(
-                                    media=msg.video.file_id,
-                                    caption=item_caption,
-                                    parse_mode=parse_mode
-                                )
-                            )
-                        elif msg.audio:
-                            input_media_list.append(
-                                InputMediaAudio(
-                                    media=msg.audio.file_id,
-                                    caption=item_caption,
-                                    parse_mode=parse_mode
-                                )
-                            )
-                        elif msg.document:
-                            input_media_list.append(
-                                InputMediaDocument(
-                                    media=msg.document.file_id,
-                                    caption=item_caption,
-                                    parse_mode=parse_mode
-                                )
-                            )
+                media_list = []
 
-                    if input_media_list:
-                        await client.send_media_group(
-                            chat_id=target_chat_id,
-                            media=input_media_list
+                for index, msg in enumerate(messages):
+                    caption = final_caption if index == 0 else ""
+                    parse_mode = (
+                        ParseMode.HTML
+                        if index == 0 and caption
+                        else None
+                    )
+
+                    if msg.photo:
+                        media_list.append(
+                            InputMediaPhoto(
+                                media=msg.photo.file_id,
+                                caption=caption,
+                                parse_mode=parse_mode
+                            )
+                        )
+                    elif msg.video:
+                        media_list.append(
+                            InputMediaVideo(
+                                media=msg.video.file_id,
+                                caption=caption,
+                                parse_mode=parse_mode
+                            )
+                        )
+                    elif msg.document:
+                        media_list.append(
+                            InputMediaDocument(
+                                media=msg.document.file_id,
+                                caption=caption,
+                                parse_mode=parse_mode
+                            )
                         )
 
-                log_msg = (
-                    f"✅ <b>Альбом переслан!</b>\n"
-                    f"Элементов: {len(messages)}\n"
+                if media_list:
+                    await client.send_media_group(
+                        chat_id=target_chat_id,
+                        media=media_list
+                    )
+
+            logging.info(
+                "Альбом %s отправлен из %s в %s",
+                buffer_key,
+                source_chat,
+                target_chat_id
+            )
+
+            await send_user_log(
+                user_id,
+                "success",
+                (
+                    f"✅ <b>Альбом переслан</b>\n"
                     f"Источник: <code>{source_chat}</code>\n"
                     f"Цель: <code>{target_chat_id}</code>"
-                )
-                await send_user_log(user_id, "success", log_msg, session_configs)
+                ),
+                session_configs
+            )
 
-            except Exception as send_err:
-                err_msg = f"❌ <b>Ошибка отправки альбома в канал {target_chat_id}:</b>\n<code>{send_err}</code>"
-                await send_user_log(user_id, "error", err_msg, session_configs)
+        except Exception as error:
+            logging.exception(
+                "Ошибка отправки альбома %s в %s",
+                buffer_key,
+                target_chat_id
+            )
 
-    except Exception as e:
-        err_msg = f"❌ <b>Ошибка пересылки альбома:</b>\n<code>{e}</code>"
-        await send_user_log(user_id, "error", err_msg, session_configs)
-
+            await send_user_log(
+                user_id,
+                "error",
+                (
+                    f"❌ <b>Ошибка отправки альбома</b>\n"
+                    f"Источник: <code>{source_chat}</code>\n"
+                    f"Цель: <code>{target_chat_id}</code>\n"
+                    f"Ошибка: <code>{error}</code>"
+                ),
+                session_configs
+            )
 
 async def start_forwarder_for_session(user_id: int, session_name: str, api_id: int, api_hash: str):
     """Главный процесс слушателя Pyrogram."""
@@ -304,8 +382,11 @@ async def start_forwarder_for_session(user_id: int, session_name: str, api_id: i
             full_config = loaded_configs.get((user_id, session_name), {})
             channels_config = full_config.get("channels", {})
 
+            # Определяем ID канала-источника
             chat_id = message.chat.id
             str_chat_id = str(chat_id)
+            
+            # Проверяем разные форматы ID (с -100 и без), чтобы не пропускать сообщения
             alt_chat_id = f"-100{abs(chat_id)}" if chat_id < 0 and not str_chat_id.startswith("-100") else str_chat_id
 
             channel_data = channels_config.get(str_chat_id) or channels_config.get(alt_chat_id)
@@ -316,7 +397,7 @@ async def start_forwarder_for_session(user_id: int, session_name: str, api_id: i
             if not export_mode.get("enabled", False):
                 return
 
-            # Находим ВСЕ каналы постинга
+            # Находим ВСЕ активные каналы постинга
             target_post_ids = []
             for cid, cdata in channels_config.items():
                 if cdata.get("modes", {}).get("post", {}).get("enabled", False):
@@ -330,13 +411,15 @@ async def start_forwarder_for_session(user_id: int, session_name: str, api_id: i
 
             export_filters = export_mode.get("filters", {})
 
+            # 1. Проверка фильтрации (минуты, символы и т.д.)
             if not is_message_allowed(message, export_filters):
-                log_msg = f"ℹ️ <b>Сообщение {message.id} отфильтровано:</b> не подходят параметры min/max или отключен тип."
+                log_msg = f"ℹ️ <b>Сообщение {message.id} отфильтровано:</b> не подходят параметры или тип медиа выключен."
                 await send_user_log(user_id, "filtered", log_msg, full_config)
                 return
 
             transform_config = export_mode.get("text_transform", full_config.get("text_transform", {}))
 
+            # 2. Обработка Альбомов (Медиагрупп)
             if message.media_group_id:
                 mg_id = message.media_group_id
                 if mg_id not in media_group_buffers:
@@ -344,29 +427,32 @@ async def start_forwarder_for_session(user_id: int, session_name: str, api_id: i
                     media_group_buffers[mg_id] = {
                         "messages": [message],
                         "task": task,
-                        "target_chats": target_post_ids,
+                        "target_chats": target_post_ids, # Передаем список всех целей
                         "transform_config": transform_config
                     }
                 else:
                     media_group_buffers[mg_id]["messages"].append(message)
                 return
 
+            # 3. Подготовка текста (если нужны замены/добавления)
             orig_html, is_media_msg = get_message_html(message)
             new_text = transform_text(orig_html, transform_config, is_media=is_media_msg)
 
-            # Отправка во все каналы постинга
+            # 4. Рассылка по всем выбранным каналам постинга
             for target_post_id in target_post_ids:
                 try:
                     if not is_transform_needed(transform_config):
+                        # Копируем 1 в 1
                         await message.copy(chat_id=target_post_id)
                     else:
+                        # Отправляем с измененным текстом
                         if not is_media_msg:
                             await client.send_message(
                                 chat_id=target_post_id,
                                 text=new_text,
                                 parse_mode=ParseMode.HTML,
                                 disable_web_page_preview=False
-                    )
+                            )
                         else:
                             await message.copy(
                                 chat_id=target_post_id,
@@ -374,7 +460,8 @@ async def start_forwarder_for_session(user_id: int, session_name: str, api_id: i
                                 parse_mode=ParseMode.HTML
                             )
 
-                    log_msg = f"✅ <b>Переслано сообщение #{message.id}</b>\nИз канала: <code>{chat_id}</code>\nВ канал: <code>{target_post_id}</code>"
+                    # Логируем успешную отправку для каждого канала
+                    log_msg = f"✅ <b>Переслано сообщение #{message.id}</b>\nИз: <code>{chat_id}</code>\nВ: <code>{target_post_id}</code>"
                     await send_user_log(user_id, "success", log_msg, full_config)
 
                 except Exception as send_err:
@@ -382,15 +469,18 @@ async def start_forwarder_for_session(user_id: int, session_name: str, api_id: i
                     await send_user_log(user_id, "error", err_msg, full_config)
 
         except Exception as e:
-            err_msg = f"❌ <b>Ошибка обработки сообщения #{getattr(message, 'id', '?')}:</b>\n<code>{e}</code>"
-            await send_user_log(user_id, "error", err_msg, full_config)
+            logging.error(f"Ошибка в обработчике сообщений: {e}")
+            err_msg = f"❌ <b>Критическая ошибка обработки #{getattr(message, 'id', '?')}:</b>\n<code>{e}</code>"
+            await send_user_log(user_id, "error", err_msg, loaded_configs.get((user_id, session_name), {}))
 
     app.add_handler(MessageHandler(message_handler))
 
     try:
         await app.start()
+        # Прогрев кэша диалогов
         async for _ in app.get_dialogs():
             pass
+        
         await asyncio.Event().wait()
     except asyncio.CancelledError:
         pass
