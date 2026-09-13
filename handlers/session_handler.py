@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import html
 from html import escape
 import copy
 from typing import Any, Dict, List, Set
