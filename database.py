@@ -54,28 +54,53 @@ class Database:
 
             return count
     
+    
     @staticmethod
-    async def get_session_posting_status(user_id: int, session_name: str) -> bool:
-        async with aiosqlite.connect(Database.DB_NAME) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                """
-                SELECT Enable_posting
-                FROM user_sessions
-                WHERE user_id = ? AND session_name = ?
-                """,
-                (user_id, session_name)
-            )
-            row = await cursor.fetchone()
+    async def get_session_posting_status(
+        user_id: int,
+        session_name: str,
+        ) -> bool:
+        	async with aiosqlite.connect(Database.DB_NAME) as db:
+        	   async with db.execute(
+        	   	     """
+        	   	     SELECT Enable_posting
+        	   	     FROM user_sessions
+        	   	     WHERE user_id = ? AND session_name = ?
+        	   	      """,
+        	   	      (user_id, session_name),
+        	   ) as cursor:
+        	   	row = await cursor.fetchone()
 
-            if row is None:
-                return False
+        	if row is None:
+        		return False
+        	return bool(row[0])
+        	
+      #@staticmethod  	
+#    async def get_session_posting_status(user_id: int, session_name: str) -> bool:
+#        async with aiosqlite.connect(Database.DB_NAME) as db:
+#            db.row_factory = aiosqlite.Row
+#            cursor = await db.execute(
+#                """
+#                SELECT Enable_posting
+#                FROM user_sessions
+#                WHERE user_id = ? AND session_name = ?
+#                """,
+#                (user_id, session_name)
+#            )
+#            row = await cursor.fetchone()
 
-            return bool(row["Enable_posting"])
+#            if row is None:
+#                return False
+
+#            return bool(row["Enable_posting"])
         
     
     @staticmethod
-    async def update_session_posting_status(user_id: int, session_name: str, status: bool):
+    async def update_session_posting_status(
+    user_id: int,
+    session_name: str,
+    enabled: bool,
+):
         async with aiosqlite.connect(Database.DB_NAME) as db:
             await db.execute(
                 """
@@ -83,7 +108,7 @@ class Database:
                 SET Enable_posting = ?
                 WHERE user_id = ? AND session_name = ?
                 """,
-                (int(status), user_id, session_name)
+                (1 if enabled else 0, user_id, session_name),
             )
             await db.commit()
             
