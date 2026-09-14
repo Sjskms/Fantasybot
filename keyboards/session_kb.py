@@ -29,18 +29,56 @@ skip_password_kb = InlineKeyboardMarkup(inline_keyboard=[
 
 
 
-def get_session_management_keyboard(session_name: str, enable_posting: bool) -> InlineKeyboardMarkup:
-    toggle_button_text = "🔀 Выключить пересылку" if enable_posting else "▶️ Включить пересылку"
+def get_session_management_keyboard(
+    session_name: str,
+    enable_posting: bool,
+) -> InlineKeyboardMarkup:
+    toggle_button_text = (
+        "🔀 Открыть управление пересылкой"
+        if enable_posting
+        else "▶️ Запустить пересылку"
+    )
 
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚙️ Настройки каналов", callback_data=f"session_config2_{session_name}")],
-        [InlineKeyboardButton(text="✏️ Текст и ссылки (HTML)", callback_data=f"text_transform_{session_name}")], 
-        [InlineKeyboardButton(text=toggle_button_text, callback_data=f"toggle_posting_{session_name}")],
-        [InlineKeyboardButton(text="📜 Настройки логов", callback_data=f"session_logging_{session_name}")],
-        [InlineKeyboardButton(text="❌ Удалить сессию", callback_data=f"delete_session_{session_name}")],
-        [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="session_settings")]
-    ])
-    
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⚙️ Настройки каналов",
+                    callback_data=f"session_config2_{session_name}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Текст и ссылки (HTML)",
+                    callback_data=f"text_transform_{session_name}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=toggle_button_text,
+                    callback_data=f"toggle_posting_{session_name}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📜 Настройки логов",
+                    callback_data=f"session_logging_{session_name}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Удалить сессию",
+                    callback_data=f"delete_session_{session_name}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад к списку",
+                    callback_data="session_settings",
+                )
+            ],
+        ]
+    )
     
     
 
