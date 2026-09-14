@@ -195,6 +195,10 @@ def build_forwarding_status_text(
     session_configs: dict,
     enabled: bool,
 ) -> str:
+    # Защита от None или некорректного типа конфига
+    if not isinstance(session_configs, dict):
+        session_configs = {}
+
     channels = session_configs.get("channels", {})
 
     if not enabled:
@@ -208,12 +212,16 @@ def build_forwarding_status_text(
     post_lines = []
 
     for raw_chat_id, channel_data in channels.items():
-        title = escape(
-            str(channel_data.get("title", f"Канал {raw_chat_id}"))
-        )
+        if not isinstance(channel_data, dict):
+            continue
+
+        # Пытаемся найти название канала в разных возможных ключах структуры БД
+        title_raw = channel_data.get("title") or channel_data.get("name") or f"Канал {raw_chat_id}"
+        title = escape(str(title_raw))
 
         modes = channel_data.get("modes", {})
 
+        # Проверяем режим экспорта
         export_mode = modes.get("export", {})
         if isinstance(export_mode, dict) and export_mode.get("enabled", False):
             filters = export_mode.get("filters", {})
@@ -222,15 +230,14 @@ def build_forwarding_status_text(
             if enabled_types:
                 media_text = ", ".join(enabled_types)
                 export_lines.append(
-                    f"• <b>{title}</b> "
-                    f"(<i>{media_text}</i>)"
+                    f"• <b>{title}</b> (<i>{media_text}</i>)"
                 )
             else:
                 export_lines.append(
-                    f"• <b>{title}</b> "
-                    f"(<i>фильтры не выбраны</i>)"
+                    f"• <b>{title}</b> (<i>все типы</i>)"
                 )
 
+        # Проверяем режим постинга
         post_mode = modes.get("post", {})
         if isinstance(post_mode, dict) and post_mode.get("enabled", False):
             post_lines.append(f"• <b>{title}</b>")
@@ -244,14 +251,14 @@ def build_forwarding_status_text(
     text += (
         "\n".join(export_lines)
         if export_lines
-        else "• Не выбраны"
+        else "• <i>Не выбраны</i>"
     )
 
     text += "\n\n📥 <b>Каналы для постинга:</b>\n"
     text += (
         "\n".join(post_lines)
         if post_lines
-        else "• Не выбраны"
+        else "• <i>Не выбраны</i>"
     )
 
     return text
