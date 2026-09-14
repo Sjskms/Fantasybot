@@ -20,8 +20,19 @@ from pyrogram.enums import ChatMemberStatus, ChatType
 
 from pyrogram.types import Chat # 
 # Local application imports
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+
 from config import API_ID, API_HASH
 from database import Database
+from services.Additional_Feature import (
+    active_forwarder_tasks,
+    restart_session_gracefully,
+    run_forwarder_forever,
+)
 from keyboards import admin_kb, user_kb
 from keyboards.session_kb import (
     get_session_management_keyboard,
@@ -35,9 +46,10 @@ from services.session_manager import SessionManager
 from states.session_states import SessionAdd, SessionStates
 from services.Additional_Feature import (
     active_forwarder_tasks,
-    start_forwarder_for_session,
+    has_session_unapplied_changes,
+    restart_session_gracefully,
+    run_forwarder_forever,
     update_live_config,
-    safe_restart_forwarder,
 )
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -65,6 +77,14 @@ CONTENT_TYPES = {
     "voices": "Голосовые",
     "video_notes": "Кружки"
 }
+
+
+
+
+
+
+
+
 
 
 def get_default_filters():
@@ -96,7 +116,145 @@ FILTER_UNITS = {
 }
 
 
+CONTENT_NAMES = {
+    "photos": "фото",
+    "videos": "видео",
+    "text": "текст",
+    "documents": "файлы",
+    "music": "музыка",
+    "voices": "голосовые",
+    "video_notes": "кружки",
+}
+def get_forwarding_menu_keyboard(
+    session_name: str,
+    enabled: bool,
+) -> InlineKeyboardMarkup:
+    if enabled:
+        toggle_text = "⏹ Выключить пересылку"
+    else:
+        toggle_text = "▶️ Включить пересылку"
 
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=toggle_text,
+                callback_data=f"toggle_posting_{session_name}",
+            )
+        ],
+    ]
+
+    if enabled:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="🔄 Перезапустить пересылку",
+                    callback_data=f"restart_posting_{session_name}",
+                )
+            ]
+        )
+
+    buttons.extend(
+        [
+            [
+                InlineKeyboardButton(
+                    text="⚙️ Настройки каналов",
+                    callback_data=f"session_config2_{session_name}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад к сессии",
+                    callback_data=f"select_session_{session_name}",
+                )
+            ],
+        ]
+    )
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_enabled_filter_names(filters: dict) -> list[str]:
+    """Возвращает включённые типы контента."""
+    result = []
+
+    for key, title in CONTENT_TYPES.items():
+        value = filters.get(key, {})
+
+        if isinstance(value, dict):
+            enabled = value.get("enabled", False)
+        else:
+            enabled = bool(value)
+
+        if enabled:
+            result.append(title)
+
+    return result
+
+
+def build_forwarding_status_text(
+    session_name: str,
+    session_configs: dict,
+    enabled: bool,
+) -> str:
+    channels = session_configs.get("channels", {})
+
+    if not enabled:
+        return (
+            "⏹ <b>Пересылка выключена</b>\n\n"
+            f"Сессия: <code>{escape(session_name)}</code>\n\n"
+            "Для запуска нажмите кнопку ниже."
+        )
+
+    export_lines = []
+    post_lines = []
+
+    for raw_chat_id, channel_data in channels.items():
+        title = escape(
+            str(channel_data.get("title", f"Канал {raw_chat_id}"))
+        )
+
+        modes = channel_data.get("modes", {})
+
+        export_mode = modes.get("export", {})
+        if isinstance(export_mode, dict) and export_mode.get("enabled", False):
+            filters = export_mode.get("filters", {})
+            enabled_types = get_enabled_filter_names(filters)
+
+            if enabled_types:
+                media_text = ", ".join(enabled_types)
+                export_lines.append(
+                    f"• <b>{title}</b> "
+                    f"(<i>{media_text}</i>)"
+                )
+            else:
+                export_lines.append(
+                    f"• <b>{title}</b> "
+                    f"(<i>фильтры не выбраны</i>)"
+                )
+
+        post_mode = modes.get("post", {})
+        if isinstance(post_mode, dict) and post_mode.get("enabled", False):
+            post_lines.append(f"• <b>{title}</b>")
+
+    text = (
+        "✅ <b>Пересылка включена!</b>\n\n"
+        f"Сессия: <code>{escape(session_name)}</code>\n\n"
+        "📤 <b>Каналы для экспорта:</b>\n"
+    )
+
+    text += (
+        "\n".join(export_lines)
+        if export_lines
+        else "• Не выбраны"
+    )
+
+    text += "\n\n📥 <b>Каналы для постинга:</b>\n"
+    text += (
+        "\n".join(post_lines)
+        if post_lines
+        else "• Не выбраны"
+    )
+
+    return text
 
 
 
@@ -136,53 +294,73 @@ def get_text_transform_keyboard(session_name: str, transform_config: dict) -> In
 
 
 
-from config import API_ID, API_HASH
-from services.Additional_Feature import restart_session_gracefully
-
-from config import API_ID, API_HASH
-from services.Additional_Feature import restart_session_gracefully
-
-@router.callback_query(F.data.startswith("apply_all_changes_"))
-async def apply_all_changes_handler(callback: CallbackQuery, state: FSMContext):
-    session_name = callback.data.removeprefix("apply_all_changes_")
+@router.callback_query(
+    F.data.startswith("apply_all_changes_")
+)
+async def apply_all_changes_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    session_name = callback.data.removeprefix(
+        "apply_all_changes_"
+    )
     user_id = callback.from_user.id
-    state_data = await state.get_data()
-    mode = state_data.get("current_mode", "export")
 
-    # 1. Показываем статус ожидания
-    await callback.message.edit_text(
-        f"⏳ <b>Применение изменений...</b>\n\n"
-        f"Выполняется мягкий перезапуск сессии <code>{session_name}</code> со всеми новыми настройками каналов и фильтров.\n"
-        f"Пожалуйста, подождите...",
-        parse_mode="HTML"
+    await callback.answer(
+        "⏳ Перезапускаю сессию...",
     )
 
-    # 2. Перезапускаем сессию
-    await restart_session_gracefully(user_id, session_name, API_ID, API_HASH)
+    await callback.message.edit_text(
+        (
+            "⏳ <b>Применение изменений</b>\n\n"
+            f"Сессия: <code>{session_name}</code>\n"
+            "Пожалуйста, подождите..."
+        ),
+        parse_mode="HTML",
+    )
 
-    # 3. Возвращаем пользователя обратно в список каналов (кнопка сохранения исчезнет, так как всё применилось)
-    session_configs = await Database.get_session_configs(user_id, session_name)
-    cached_channels = state_data.get("cached_channels", [])
-    selected_ids = state_data.get("selected_channels_ids", set())
-
-    keyboard = await _build_channels_keyboard(
-        cached_channels=cached_channels,
-        selected_channels_ids=selected_ids,
-        session_name=session_name,
-        mode=mode,
+    restarted = await restart_session_gracefully(
         user_id=user_id,
-        session_configs=session_configs
+        session_name=session_name,
+        api_id=API_ID,
+        api_hash=API_HASH,
     )
 
-    mode_title = "Экспорт" if mode == "export" else "Постинг"
-    await callback.message.edit_text(
-        f"✅ <b>Все изменения успешно применены!</b>\n\n"
-        f"Сессия <code>{session_name}</code> перезапущена и работает по обновленным правилам.\n\n"
-        f"📋 <b>Каналы для режима: {mode_title}</b>:",
-        reply_markup=keyboard,
-        parse_mode="HTML"
+    if restarted:
+        text = (
+            "✅ <b>Изменения применены</b>\n\n"
+            f"Сессия <code>{session_name}</code> "
+            "перезапущена и работает с новым конфигом."
+        )
+    else:
+        text = (
+            "✅ <b>Изменения сохранены</b>\n\n"
+            "Пересылка сейчас выключена. Новые настройки "
+            "применятся при следующем запуске."
+        )
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⚙️ К настройкам каналов",
+                    callback_data=f"session_config2_{session_name}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Главное меню",
+                    callback_data="main_menu",
+                )
+            ],
+        ]
     )
-    await callback.answer("Сессия перезапущена!", show_alert=False)
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
 
 
 
@@ -331,18 +509,24 @@ async def process_custom_text(message: Message, state: FSMContext):
     session_name = data.get("current_session")
     user_id = message.from_user.id
 
+    # 1. Извлекаем текст
+    custom_text_input = message.text or message.caption or ""
+
+    # 2. Сохраняем в БД
     configs = await Database.get_session_configs(user_id, session_name)
+    if not isinstance(configs, dict):
+        configs = {}
+
     if "text_transform" not in configs:
         configs["text_transform"] = {}
     
-    # Сохраняем введенный HTML-текст
-    configs["text_transform"]["custom_text"] = message.text or message.caption or ""
+    configs["text_transform"]["custom_text"] = custom_text_input
     
     await Database.update_session_configs(user_id, session_name, configs)
     await update_live_config(user_id, session_name)
     await state.set_state(None)
 
-    # Загружаем обновленную конфигурацию
+    # 3. Подготавливаем безопасные данные для отображения
     tt_cfg = configs.get("text_transform", {})
 
     mode_names = {
@@ -352,26 +536,41 @@ async def process_custom_text(message: Message, state: FSMContext):
         "replace": "Полная замена текста"
     }
 
+    current_mode = tt_cfg.get("mode", "keep")
     words_count = len(tt_cfg.get("replace_words", []))
     links_count = len(tt_cfg.get("replace_links", []))
-    custom_preview = tt_cfg.get("custom_text") or "<i>(не задан)</i>"
-    if len(custom_preview) > 100:
-        custom_preview = custom_preview[:100] + "..."
+
+    # Безопасный экранированный предпросмотр
+    if custom_text_input.strip():
+        safe_preview = html.escape(custom_text_input.strip())
+        if len(safe_preview) > 120:
+            safe_preview = safe_preview[:120] + "..."
+        custom_preview = f"<code>{safe_preview}</code>"
+    else:
+        custom_preview = "<i>(не задан)</i>"
 
     text = (
         f"✅ <b>Кастомный текст успешно сохранен!</b>\n\n"
         f"✏️ <b>Настройки текста и ссылок:</b> <code>{session_name}</code>\n\n"
-        f"🔹 <b>Режим вставки:</b> {mode_names.get(tt_cfg.get('mode', 'keep'))}\n"
+        f"🔹 <b>Режим вставки:</b> {mode_names.get(current_mode, 'Не выбран')}\n"
         f"🔹 <b>Правил замены слов:</b> {words_count}\n"
         f"🔹 <b>Правил замены ссылок:</b> {links_count}\n\n"
         f"📝 <b>Текущий кастомный текст:</b>\n{custom_preview}\n\n"
         "Выберите действие ниже:"
     )
 
-    # Получаем полные кнопки меню настроек
     keyboard = get_text_transform_keyboard(session_name, tt_cfg)
 
-    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    try:
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        logging.error(f"Ошибка парсинга HTML при подтверждении текста: {e}")
+        # Запасной вариант, если разметка все равно выдаст ошибку
+        fallback_text = (
+            f"✅ <b>Кастомный текст успешно сохранен!</b>\n\n"
+            f"✏️ Настройки текста и ссылок для сессии: <code>{session_name}</code>"
+        )
+        await message.answer(fallback_text, reply_markup=keyboard, parse_mode="HTML")
 
 
 # --- 2. Добавить замену слова ---
@@ -588,51 +787,200 @@ async def toggle_log_option_handler(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("toggle_posting_"))
 async def toggle_posting_handler(callback: CallbackQuery):
     user_id = callback.from_user.id
-    session_name = callback.data.split("_", 2)[2]
+    session_name = callback.data.removeprefix("toggle_posting_")
     task_key = (user_id, session_name)
 
-    current_status = await Database.get_session_posting_status(user_id, session_name)
+    current_status = await Database.get_session_posting_status(
+        user_id,
+        session_name,
+    )
     new_status = not current_status
 
     if new_status:
-        post_channels_count = await Database.get_session_channels_count(user_id, session_name, 'post')
-        export_channels_count = await Database.get_session_channels_count(user_id, session_name, 'export')
+        post_channels_count = await Database.get_session_channels_count(
+            user_id,
+            session_name,
+            "post",
+        )
+        export_channels_count = await Database.get_session_channels_count(
+            user_id,
+            session_name,
+            "export",
+        )
 
         if post_channels_count == 0 or export_channels_count == 0:
             await callback.answer(
-                "⚠️ Невозможно включить пересылку: убедитесь, что настроен как минимум один канал для постинга и один для экспорта.",
-                show_alert=True
+                (
+                    "⚠️ Невозможно включить пересылку.\n"
+                    "Настройте хотя бы один канал для постинга "
+                    "и один канал для экспорта."
+                ),
+                show_alert=True,
             )
             return
 
-        await Database.update_session_posting_status(user_id, session_name, True)
+        # Сначала выключаем старую задачу, если она есть
+        old_task = active_forwarder_tasks.pop(
+            task_key,
+            None,
+        )
 
-        if task_key in active_forwarder_tasks:
-            active_forwarder_tasks[task_key].cancel()
+        if old_task:
+            old_task.cancel()
+
+            try:
+                await old_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logging.exception(
+                    "Ошибка остановки старого forwarder: %s",
+                    session_name,
+                )
+
+        await Database.update_session_posting_status(
+            user_id,
+            session_name,
+            True,
+        )
 
         task = asyncio.create_task(
-            start_forwarder_for_session(
+            run_forwarder_forever(
                 user_id=user_id,
                 session_name=session_name,
                 api_id=API_ID,
-                api_hash=API_HASH
-            )
+                api_hash=API_HASH,
+            ),
+            name=f"forwarder:{user_id}:{session_name}",
         )
+
         active_forwarder_tasks[task_key] = task
 
-    else:
-        await Database.update_session_posting_status(user_id, session_name, False)
+        logging.info(
+            "Пересылка включена: user=%s, session=%s",
+            user_id,
+            session_name,
+        )
 
-        if task_key in active_forwarder_tasks:
-            task = active_forwarder_tasks.pop(task_key)
+    else:
+        await Database.update_session_posting_status(
+            user_id,
+            session_name,
+            False,
+        )
+
+        task = active_forwarder_tasks.pop(
+            task_key,
+            None,
+        )
+
+        if task:
             task.cancel()
 
-    updated_keyboard = get_session_management_keyboard(session_name, new_status)
-    await callback.message.edit_reply_markup(reply_markup=updated_keyboard)
-    await callback.answer(f"Пересылка {'✅ включена' if new_status else '❌ выключена'}.")
-    
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logging.exception(
+                    "Ошибка остановки forwarder: %s",
+                    session_name,
+                )
 
+        logging.info(
+            "Пересылка выключена: user=%s, session=%s",
+            user_id,
+            session_name,
+        )
 
+    # Получаем свежий конфиг и отображаем меню статуса
+    session_configs = await Database.get_session_configs(
+        user_id,
+        session_name,
+    )
+
+    status_text = build_forwarding_status_text(
+        session_name=session_name,
+        session_configs=session_configs,
+        enabled=new_status,
+    )
+
+    keyboard = get_forwarding_menu_keyboard(
+        session_name,
+        new_status,
+    )
+
+    try:
+        await callback.message.edit_text(
+            status_text,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest as error:
+        if "message is not modified" not in str(error):
+            raise
+
+    await callback.answer(
+        "Пересылка включена ✅"
+        if new_status
+        else "Пересылка выключена ⏹"
+    )
+
+@router.callback_query(F.data.startswith("restart_posting_"))
+async def restart_posting_handler(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    session_name = callback.data.removeprefix("restart_posting_")
+
+    await callback.answer("⏳ Перезапускаю пересылку...")
+
+    await callback.message.edit_text(
+        (
+            "⏳ <b>Перезапуск пересылки</b>\n\n"
+            f"Сессия: <code>{escape(session_name)}</code>\n"
+            "Пожалуйста, подождите..."
+        ),
+        parse_mode="HTML",
+    )
+
+    restarted = await restart_session_gracefully(
+        user_id=user_id,
+        session_name=session_name,
+        api_id=API_ID,
+        api_hash=API_HASH,
+    )
+
+    session_configs = await Database.get_session_configs(
+        user_id,
+        session_name,
+    )
+
+    status_text = build_forwarding_status_text(
+        session_name=session_name,
+        session_configs=session_configs,
+        enabled=restarted,
+    )
+
+    keyboard = get_forwarding_menu_keyboard(
+        session_name,
+        restarted,
+    )
+
+    if restarted:
+        status_text = (
+            "✅ <b>Пересылка перезапущена!</b>\n\n"
+            + status_text
+        )
+    else:
+        status_text = (
+            "⏹ <b>Пересылка выключена.</b>\n\n"
+            "Новые настройки будут применены при следующем запуске."
+        )
+
+    await callback.message.edit_text(
+        status_text,
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
 
 
 
