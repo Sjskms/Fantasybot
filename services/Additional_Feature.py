@@ -1,10 +1,10 @@
 import asyncio
 import copy
-import json
 import logging
 import re
 import aiosqlite
-from pyrogram import Client, filters
+
+from pyrogram import Client
 from pyrogram.enums import ParseMode
 from pyrogram.handlers import MessageHandler
 from pyrogram.types import (
@@ -12,171 +12,153 @@ from pyrogram.types import (
     InputMediaPhoto,
     InputMediaVideo,
     InputMediaAudio,
-    InputMediaDocument
+    InputMediaDocument,
 )
 
 from config import API_ID, API_HASH
 from database import Database
 
+
 active_forwarder_tasks: dict[tuple[int, str], asyncio.Task] = {}
 loaded_configs: dict[tuple[int, str], dict] = {}
 running_configs: dict[tuple[int, str], dict] = {}
 media_group_buffers: dict[str, dict] = {}
-restart_timers: dict[tuple[int, str], asyncio.TimerHandle] = {}
 
 bot_instance = None
 
-def get_enabled_export_channels(channels_config: dict) -> dict[int, dict]:
-    """
-    Возвращает все активные каналы экспорта:
-    {
-        chat_id: export_mode_config
-    }
-    """
-    result = {}
 
-    for chat_id_raw, channel_data in channels_config.items():
-        try:
-            chat_id = int(chat_id_raw)
-        except (TypeError, ValueError):
-            logging.error("Некорректный ID канала в конфиге: %r", chat_id_raw)
-            continue
-
-        modes = channel_data.get("modes", {})
-        export_mode = modes.get("export", {})
-
-        if isinstance(export_mode, dict) and export_mode.get("enabled", False):
-            result[chat_id] = export_mode
-
-    return result
-
-
-def get_enabled_post_channels(channels_config: dict) -> list[int]:
-    """Возвращает все активные каналы постинга."""
-    result = []
-
-    for chat_id_raw, channel_data in channels_config.items():
-        try:
-            chat_id = int(chat_id_raw)
-        except (TypeError, ValueError):
-            continue
-
-        modes = channel_data.get("modes", {})
-        post_mode = modes.get("post", {})
-
-        if isinstance(post_mode, dict) and post_mode.get("enabled", False):
-            result.append(chat_id)
-
-    return result
-    
-    
-    
 def set_bot_instance(bot):
-    """Инициализация объекта бота для логов."""
     global bot_instance
     bot_instance = bot
 
 
 def set_running_config(user_id: int, session_name: str, config: dict):
-    """Фиксирует снимок конфига, на котором клиент РЕАЛЬНО работает прямо сейчас."""
     running_configs[(user_id, session_name)] = copy.deepcopy(config or {})
 
 
-def has_session_unapplied_changes(user_id: int, session_name: str, current_db_config: dict) -> bool:
-    """Проверяет, отличается ли текущий конфиг в БД от работающего в памяти."""
+def has_session_unapplied_changes(
+    user_id: int,
+    session_name: str,
+    current_db_config: dict,
+) -> bool:
     running = running_configs.get((user_id, session_name))
+
     if running is None:
         return False
+
     return running != (current_db_config or {})
 
 
 async def update_live_config(user_id: int, session_name: str):
-    """Синхронизирует конфиг из БД в память."""
+    """
+    Обновляет конфиг в памяти только для отображения/служебных задач.
+    Рабочий клиент использует конфиг, загруженный при запуске.
+    """
     configs = await Database.get_session_configs(user_id, session_name)
     loaded_configs[(user_id, session_name)] = configs or {}
-    logging.info(f"Конфиг для '{session_name}' синхронизирован в памяти.")
+
+    logging.info(
+        "Конфиг для '%s' загружен из БД",
+        session_name,
+    )
 
 
-async def send_user_log(user_id: int, log_type: str, message_text: str, session_configs: dict):
-    """Отправляет лог пользователю в личные сообщения через Aiogram Бот."""
+async def send_user_log(
+    user_id: int,
+    log_type: str,
+    message_text: str,
+    session_configs: dict,
+):
     if not bot_instance:
         return
 
-    log_settings = session_configs.get("logging", {})
-    if not log_settings.get("enabled", False):
+    logging_config = session_configs.get("logging", {})
+
+    if not logging_config.get("enabled", False):
         return
 
-    if log_type == "success" and not log_settings.get("log_success", True):
+    if log_type == "success" and not logging_config.get("log_success", True):
         return
-    if log_type == "filtered" and not log_settings.get("log_filtered", False):
+
+    if log_type == "filtered" and not logging_config.get("log_filtered", False):
         return
-    if log_type == "error" and not log_settings.get("log_errors", True):
+
+    if log_type == "error" and not logging_config.get("log_errors", True):
         return
 
     try:
         await bot_instance.send_message(
             chat_id=user_id,
             text=message_text,
-            parse_mode="HTML",
-            disable_web_page_preview=True
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
         )
-    except Exception as e:
-        logging.error(f"Не удалось отправить лог пользователю {user_id}: {e}")
+    except Exception:
+        logging.exception("Не удалось отправить лог пользователю %s", user_id)
 
 
 def is_transform_needed(transform_config: dict) -> bool:
-    """Проверяет, требуется ли трансформация текста."""
-    if not transform_config:
+    if not isinstance(transform_config, dict):
         return False
+
     mode = transform_config.get("mode", "keep")
-    custom_text = transform_config.get("custom_text", "").strip()
+    custom_text = str(transform_config.get("custom_text", "")).strip()
     replace_words = transform_config.get("replace_words", [])
     replace_links = transform_config.get("replace_links", [])
 
-    if mode != "keep" and custom_text:
-        return True
-    if replace_words or replace_links:
-        return True
-    return False
+    return bool(
+        (mode != "keep" and custom_text)
+        or replace_words
+        or replace_links
+    )
 
 
 def get_message_html(message: Message) -> tuple[str, bool]:
-    """Извлекает текст или подпись сообщения с сохранением исходных HTML-ссылок."""
     is_media = bool(message.media)
+
     if is_media:
-        html_text = getattr(message.caption, "html", None) or message.caption or ""
+        source = message.caption
     else:
-        html_text = getattr(message.text, "html", None) or message.text or ""
+        source = message.text
+
+    html_text = getattr(source, "html", None) or source or ""
     return html_text, is_media
 
 
-def transform_text(original_html: str, transform_config: dict, is_media: bool = False) -> str:
-    """Обрабатывает HTML-текст с сохранением существующих встроенных ссылок."""
-    if not transform_config:
+def transform_text(
+    original_html: str,
+    transform_config: dict,
+    is_media: bool = False,
+) -> str:
+    if not isinstance(transform_config, dict):
         return original_html or ""
 
     text = original_html or ""
 
-    replace_links = transform_config.get("replace_links", [])
-    for item in replace_links:
+    for item in transform_config.get("replace_links", []):
         old_link = item.get("from")
         new_link = item.get("to")
-        if old_link and new_link:
-            text = text.replace(old_link, new_link)
 
-    replace_words = transform_config.get("replace_words", [])
-    for item in replace_words:
+        if old_link:
+            text = text.replace(old_link, new_link or "")
+
+    for item in transform_config.get("replace_words", []):
         old_word = item.get("from")
         new_word = item.get("to")
+
         if old_word:
-            text = re.sub(re.escape(old_word), new_word or "", text, flags=re.IGNORECASE)
+            text = re.sub(
+                re.escape(old_word),
+                new_word or "",
+                text,
+                flags=re.IGNORECASE,
+            )
 
     mode = transform_config.get("mode", "keep")
     custom_text = transform_config.get("custom_text", "")
 
-    if mode == "replace":
-        if is_media:
-            text = custom_text
+    if mode == "replace" and is_media:
+        text = custom_text
     elif mode == "append" and custom_text:
         text = f"{text}\n\n{custom_text}" if text else custom_text
     elif mode == "prepend" and custom_text:
@@ -186,70 +168,163 @@ def transform_text(original_html: str, transform_config: dict, is_media: bool = 
 
 
 def is_message_allowed(message: Message, export_filters: dict) -> bool:
-    """Проверка лимитов (символы, секунды, байты)."""
-    text_content = message.text or message.caption or ""
+    if not isinstance(export_filters, dict):
+        return False
 
     def get_rules(key: str):
-        f = export_filters.get(key, {})
-        if isinstance(f, dict):
-            return f.get("enabled", False), f.get("min", 0), f.get("max", 999999)
-        return bool(f), 0, 999999
+        value = export_filters.get(key, {})
 
+        if isinstance(value, dict):
+            return (
+                bool(value.get("enabled", False)),
+                int(value.get("min", 0)),
+                int(value.get("max", 999999999)),
+            )
+
+        if isinstance(value, bool):
+            return value, 0, 999999999
+
+        return False, 0, 999999999
+
+    # Обычный текст
     if message.text and not message.media:
-        enabled, min_v, max_v = get_rules("text")
-        return enabled and (min_v <= len(text_content) <= max_v)
+        enabled, min_value, max_value = get_rules("text")
+        text_length = len(message.text)
 
-    if message.media:
-        if message.caption:
-            enabled, min_v, max_v = get_rules("text")
-            if enabled and not (min_v <= len(message.caption) <= max_v):
-                return False
+        return (
+            enabled
+            and min_value <= text_length <= max_value
+        )
 
-        if message.photo:
-            enabled, min_v, max_v = get_rules("photos")
-            return enabled and (min_v <= (message.photo.file_size or 0) <= max_v)
-        elif message.video:
-            enabled, min_v, max_v = get_rules("videos")
-            return enabled and (min_v <= (message.video.duration or 0) <= max_v)
-        elif message.video_note:
-            enabled, min_v, max_v = get_rules("video_notes")
-            return enabled and (min_v <= (message.video_note.duration or 0) <= max_v)
-        elif message.voice:
-            enabled, min_v, max_v = get_rules("voices")
-            return enabled and (min_v <= (message.voice.duration or 0) <= max_v)
-        elif message.audio:
-            enabled, min_v, max_v = get_rules("music")
-            return enabled and (min_v <= (message.audio.duration or 0) <= max_v)
-        elif message.document:
-            enabled, min_v, max_v = get_rules("documents")
-            return enabled and (min_v <= (message.document.file_size or 0) <= max_v)
+    # Фото
+    if message.photo:
+        enabled, min_value, max_value = get_rules("photos")
+        file_size = message.photo.file_size or 0
 
-    return True
+        return (
+            enabled
+            and min_value <= file_size <= max_value
+        )
+
+    # Видео
+    if message.video:
+        enabled, min_value, max_value = get_rules("videos")
+        duration = message.video.duration or 0
+
+        return (
+            enabled
+            and min_value <= duration <= max_value
+        )
+
+    # Кружок
+    if message.video_note:
+        enabled, min_value, max_value = get_rules("video_notes")
+        duration = message.video_note.duration or 0
+
+        return (
+            enabled
+            and min_value <= duration <= max_value
+        )
+
+    # Голосовое
+    if message.voice:
+        enabled, min_value, max_value = get_rules("voices")
+        duration = message.voice.duration or 0
+
+        return (
+            enabled
+            and min_value <= duration <= max_value
+        )
+
+    # Музыка
+    if message.audio:
+        enabled, min_value, max_value = get_rules("music")
+        duration = message.audio.duration or 0
+
+        return (
+            enabled
+            and min_value <= duration <= max_value
+        )
+
+    # Документ
+    if message.document:
+        enabled, min_value, max_value = get_rules("documents")
+        file_size = message.document.file_size or 0
+
+        return (
+            enabled
+            and min_value <= file_size <= max_value
+        )
+
+    return False
+
+
+def get_export_channels(channels_config: dict) -> dict[int, dict]:
+    result = {}
+
+    for raw_id, channel_data in channels_config.items():
+        try:
+            chat_id = int(raw_id)
+        except (TypeError, ValueError):
+            logging.warning("Некорректный ID канала: %r", raw_id)
+            continue
+
+        export_mode = (
+            channel_data
+            .get("modes", {})
+            .get("export", {})
+        )
+
+        if (
+            isinstance(export_mode, dict)
+            and export_mode.get("enabled", False)
+        ):
+            result[chat_id] = export_mode
+
+    return result
+
+
+def get_post_channels(channels_config: dict) -> list[int]:
+    result = []
+
+    for raw_id, channel_data in channels_config.items():
+        try:
+            chat_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+
+        post_mode = (
+            channel_data
+            .get("modes", {})
+            .get("post", {})
+        )
+
+        if (
+            isinstance(post_mode, dict)
+            and post_mode.get("enabled", False)
+        ):
+            result.append(chat_id)
+
+    return result
 
 
 async def forward_album_delayed(
     buffer_key: str,
     client: Client,
     user_id: int,
-    session_configs: dict
+    session_configs: dict,
 ):
     await asyncio.sleep(1.5)
 
-    buf = media_group_buffers.pop(buffer_key, None)
-    if not buf:
+    buffer = media_group_buffers.pop(buffer_key, None)
+
+    if not buffer:
         return
 
-    messages = buf["messages"]
-    target_chats = buf.get("target_chats", [])
-    transform_config = buf.get("transform_config", {})
-    source_chat = buf.get("source_chat")
-
-    if not target_chats:
-        logging.warning(
-            "Для альбома %s нет каналов назначения",
-            buffer_key
-        )
-        return
+    messages = buffer["messages"]
+    target_chats = buffer.get("target_chats", [])
+    transform_config = buffer.get("transform_config", {})
+    source_chat = buffer.get("source_chat")
 
     messages.sort(key=lambda item: item.id)
 
@@ -259,31 +334,31 @@ async def forward_album_delayed(
                 await client.copy_media_group(
                     chat_id=target_chat_id,
                     from_chat_id=source_chat,
-                    message_id=messages[0].id
+                    message_id=messages[0].id,
                 )
             else:
-                orig_caption_html = ""
+                original_caption = ""
 
-                for msg in messages:
-                    caption_html = (
-                        getattr(msg.caption, "html", None)
-                        or msg.caption
+                for message in messages:
+                    caption = (
+                        getattr(message.caption, "html", None)
+                        or message.caption
                         or ""
                     )
 
-                    if caption_html:
-                        orig_caption_html = caption_html
+                    if caption:
+                        original_caption = caption
                         break
 
                 final_caption = transform_text(
-                    orig_caption_html,
+                    original_caption,
                     transform_config,
-                    is_media=True
+                    is_media=True,
                 )
 
-                media_list = []
+                media = []
 
-                for index, msg in enumerate(messages):
+                for index, message in enumerate(messages):
                     caption = final_caption if index == 0 else ""
                     parse_mode = (
                         ParseMode.HTML
@@ -291,278 +366,498 @@ async def forward_album_delayed(
                         else None
                     )
 
-                    if msg.photo:
-                        media_list.append(
+                    if message.photo:
+                        media.append(
                             InputMediaPhoto(
-                                media=msg.photo.file_id,
+                                media=message.photo.file_id,
                                 caption=caption,
-                                parse_mode=parse_mode
-                            )
-                        )
-                    elif msg.video:
-                        media_list.append(
-                            InputMediaVideo(
-                                media=msg.video.file_id,
-                                caption=caption,
-                                parse_mode=parse_mode
-                            )
-                        )
-                    elif msg.document:
-                        media_list.append(
-                            InputMediaDocument(
-                                media=msg.document.file_id,
-                                caption=caption,
-                                parse_mode=parse_mode
+                                parse_mode=parse_mode,
                             )
                         )
 
-                if media_list:
+                    elif message.video:
+                        media.append(
+                            InputMediaVideo(
+                                media=message.video.file_id,
+                                caption=caption,
+                                parse_mode=parse_mode,
+                            )
+                        )
+
+                    elif message.document:
+                        media.append(
+                            InputMediaDocument(
+                                media=message.document.file_id,
+                                caption=caption,
+                                parse_mode=parse_mode,
+                            )
+                        )
+
+                if media:
                     await client.send_media_group(
                         chat_id=target_chat_id,
-                        media=media_list
+                        media=media,
                     )
-
-            logging.info(
-                "Альбом %s отправлен из %s в %s",
-                buffer_key,
-                source_chat,
-                target_chat_id
-            )
 
             await send_user_log(
                 user_id,
                 "success",
                 (
-                    f"✅ <b>Альбом переслан</b>\n"
+                    "✅ <b>Альбом переслан</b>\n"
                     f"Источник: <code>{source_chat}</code>\n"
                     f"Цель: <code>{target_chat_id}</code>"
                 ),
-                session_configs
+                session_configs,
             )
 
         except Exception as error:
-            logging.exception(
-                "Ошибка отправки альбома %s в %s",
-                buffer_key,
-                target_chat_id
-            )
+            logging.exception("Ошибка отправки альбома")
 
             await send_user_log(
                 user_id,
                 "error",
                 (
-                    f"❌ <b>Ошибка отправки альбома</b>\n"
+                    "❌ <b>Ошибка отправки альбома</b>\n"
                     f"Источник: <code>{source_chat}</code>\n"
                     f"Цель: <code>{target_chat_id}</code>\n"
                     f"Ошибка: <code>{error}</code>"
                 ),
-                session_configs
+                session_configs,
             )
 
-async def start_forwarder_for_session(user_id: int, session_name: str, api_id: int, api_hash: str):
-    """Главный процесс слушателя Pyrogram."""
-    session_string = await Database.get_session_string(user_id, session_name)
+
+async def start_forwarder_for_session(
+    user_id: int,
+    session_name: str,
+    api_id: int,
+    api_hash: str,
+):
+    session_string = await Database.get_session_string(
+        user_id,
+        session_name,
+    )
+
     if not session_string:
+        logging.error("Строка сессии не найдена: %s", session_name)
         return
 
+    # Конфиг загружается один раз при запуске клиента.
     await update_live_config(user_id, session_name)
-    current_cfg = loaded_configs.get((user_id, session_name), {})
-    set_running_config(user_id, session_name, current_cfg)
+
+    session_config = loaded_configs.get(
+        (user_id, session_name),
+        {},
+    )
+
+    set_running_config(
+        user_id,
+        session_name,
+        session_config,
+    )
 
     app = Client(
         name=f"session_{user_id}_{session_name}",
         api_id=api_id,
         api_hash=api_hash,
         session_string=session_string,
-        in_memory=True
+        in_memory=True,
     )
 
     async def message_handler(client: Client, message: Message):
+        full_config = copy.deepcopy(
+            loaded_configs.get(
+                (user_id, session_name),
+                {},
+            )
+        )
+
         try:
-            full_config = loaded_configs.get((user_id, session_name), {})
             channels_config = full_config.get("channels", {})
 
-            # Определяем ID канала-источника
-            chat_id = message.chat.id
-            str_chat_id = str(chat_id)
-            
-            # Проверяем разные форматы ID (с -100 и без), чтобы не пропускать сообщения
-            alt_chat_id = f"-100{abs(chat_id)}" if chat_id < 0 and not str_chat_id.startswith("-100") else str_chat_id
+            export_channels = get_export_channels(
+                channels_config
+            )
 
-            channel_data = channels_config.get(str_chat_id) or channels_config.get(alt_chat_id)
-            if not channel_data:
+            target_chats = get_post_channels(
+                channels_config
+            )
+
+            source_chat_id = int(message.chat.id)
+
+            export_mode = export_channels.get(source_chat_id)
+
+            if export_mode is None:
+                logging.info(
+                    "Сообщение из неактивного источника: %s",
+                    source_chat_id,
+                )
                 return
 
-            export_mode = channel_data.get("modes", {}).get("export", {})
-            if not export_mode.get("enabled", False):
+            if not target_chats:
+                logging.warning(
+                    "Каналы назначения не выбраны: %s",
+                    session_name,
+                )
                 return
 
-            # Находим ВСЕ активные каналы постинга
-            target_post_ids = []
-            for cid, cdata in channels_config.items():
-                if cdata.get("modes", {}).get("post", {}).get("enabled", False):
-                    try:
-                        target_post_ids.append(int(cid))
-                    except ValueError:
-                        pass
+            export_filters = export_mode.get(
+                "filters",
+                {},
+            )
 
-            if not target_post_ids:
+            if not is_message_allowed(
+                message,
+                export_filters,
+            ):
+                logging.info(
+                    "Сообщение %s не прошло фильтр",
+                    message.id,
+                )
+
+                await send_user_log(
+                    user_id,
+                    "filtered",
+                    (
+                        "ℹ️ <b>Сообщение отфильтровано</b>\n"
+                        f"Источник: <code>{source_chat_id}</code>\n"
+                        f"ID: <code>{message.id}</code>"
+                    ),
+                    full_config,
+                )
                 return
 
-            export_filters = export_mode.get("filters", {})
+            transform_config = export_mode.get(
+                "text_transform",
+                full_config.get(
+                    "text_transform",
+                    {},
+                ),
+            )
 
-            # 1. Проверка фильтрации (минуты, символы и т.д.)
-            if not is_message_allowed(message, export_filters):
-                log_msg = f"ℹ️ <b>Сообщение {message.id} отфильтровано:</b> не подходят параметры или тип медиа выключен."
-                await send_user_log(user_id, "filtered", log_msg, full_config)
-                return
-
-            transform_config = export_mode.get("text_transform", full_config.get("text_transform", {}))
-
-            # 2. Обработка Альбомов (Медиагрупп)
             if message.media_group_id:
-                mg_id = message.media_group_id
-                if mg_id not in media_group_buffers:
-                    task = asyncio.create_task(forward_album_delayed(mg_id, client, user_id, full_config))
-                    media_group_buffers[mg_id] = {
+                buffer_key = (
+                    f"{source_chat_id}:"
+                    f"{message.media_group_id}"
+                )
+
+                if buffer_key not in media_group_buffers:
+                    task = asyncio.create_task(
+                        forward_album_delayed(
+                            buffer_key,
+                            client,
+                            user_id,
+                            full_config,
+                        )
+                    )
+
+                    media_group_buffers[buffer_key] = {
                         "messages": [message],
                         "task": task,
-                        "target_chats": target_post_ids, # Передаем список всех целей
-                        "transform_config": transform_config
+                        "target_chats": target_chats.copy(),
+                        "transform_config": transform_config,
+                        "source_chat": source_chat_id,
                     }
                 else:
-                    media_group_buffers[mg_id]["messages"].append(message)
+                    media_group_buffers[buffer_key][
+                        "messages"
+                    ].append(message)
+
                 return
 
-            # 3. Подготовка текста (если нужны замены/добавления)
-            orig_html, is_media_msg = get_message_html(message)
-            new_text = transform_text(orig_html, transform_config, is_media=is_media_msg)
+            original_html, is_media = get_message_html(message)
 
-            # 4. Рассылка по всем выбранным каналам постинга
-            for target_post_id in target_post_ids:
+            new_text = transform_text(
+                original_html,
+                transform_config,
+                is_media=is_media,
+            )
+
+            for target_chat_id in target_chats:
                 try:
                     if not is_transform_needed(transform_config):
-                        # Копируем 1 в 1
-                        await message.copy(chat_id=target_post_id)
+                        await message.copy(
+                            chat_id=target_chat_id,
+                        )
+
+                    elif not is_media:
+                        await client.send_message(
+                            chat_id=target_chat_id,
+                            text=new_text,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=False,
+                        )
+
                     else:
-                        # Отправляем с измененным текстом
-                        if not is_media_msg:
-                            await client.send_message(
-                                chat_id=target_post_id,
-                                text=new_text,
-                                parse_mode=ParseMode.HTML,
-                                disable_web_page_preview=False
-                            )
-                        else:
-                            await message.copy(
-                                chat_id=target_post_id,
-                                caption=new_text,
-                                parse_mode=ParseMode.HTML
-                            )
+                        await message.copy(
+                            chat_id=target_chat_id,
+                            caption=new_text,
+                            parse_mode=ParseMode.HTML,
+                        )
 
-                    # Логируем успешную отправку для каждого канала
-                    log_msg = f"✅ <b>Переслано сообщение #{message.id}</b>\nИз: <code>{chat_id}</code>\nВ: <code>{target_post_id}</code>"
-                    await send_user_log(user_id, "success", log_msg, full_config)
+                    await send_user_log(
+                        user_id,
+                        "success",
+                        (
+                            "✅ <b>Сообщение переслано</b>\n"
+                            f"Источник: <code>{source_chat_id}</code>\n"
+                            f"Цель: <code>{target_chat_id}</code>\n"
+                            f"ID: <code>{message.id}</code>"
+                        ),
+                        full_config,
+                    )
 
-                except Exception as send_err:
-                    err_msg = f"❌ <b>Ошибка отправки в канал {target_post_id}:</b>\n<code>{send_err}</code>"
-                    await send_user_log(user_id, "error", err_msg, full_config)
+                except Exception as error:
+                    logging.exception(
+                        "Ошибка отправки сообщения %s в %s",
+                        message.id,
+                        target_chat_id,
+                    )
 
-        except Exception as e:
-            logging.error(f"Ошибка в обработчике сообщений: {e}")
-            err_msg = f"❌ <b>Критическая ошибка обработки #{getattr(message, 'id', '?')}:</b>\n<code>{e}</code>"
-            await send_user_log(user_id, "error", err_msg, loaded_configs.get((user_id, session_name), {}))
+                    await send_user_log(
+                        user_id,
+                        "error",
+                        (
+                            "❌ <b>Ошибка отправки</b>\n"
+                            f"Источник: <code>{source_chat_id}</code>\n"
+                            f"Цель: <code>{target_chat_id}</code>\n"
+                            f"Ошибка: <code>{error}</code>"
+                        ),
+                        full_config,
+                    )
 
-    app.add_handler(MessageHandler(message_handler))
+        except Exception as error:
+            logging.exception(
+                "Критическая ошибка обработки сообщения"
+            )
+
+            await send_user_log(
+                user_id,
+                "error",
+                (
+                    "❌ <b>Критическая ошибка обработки</b>\n"
+                    f"Ошибка: <code>{error}</code>"
+                ),
+                full_config,
+            )
+
+    app.add_handler(
+        MessageHandler(message_handler)
+    )
 
     try:
         await app.start()
-        # Прогрев кэша диалогов
+
+        logging.info(
+            "Pyrogram-клиент запущен: %s",
+            session_name,
+        )
+
         async for _ in app.get_dialogs():
             pass
-        
+
+        logging.info(
+            "Диалоги загружены: %s",
+            session_name,
+        )
+
         await asyncio.Event().wait()
+
     except asyncio.CancelledError:
-        pass
+        logging.info(
+            "Pyrogram-клиент остановлен: %s",
+            session_name,
+        )
+        raise
+
+    except Exception:
+        logging.exception(
+            "Ошибка Pyrogram-клиента: %s",
+            session_name,
+        )
+        raise
+
     finally:
-        if app.is_connected:
-            await app.stop()
+        try:
+            if app.is_connected:
+                await app.stop()
+        except Exception:
+            logging.exception(
+                "Ошибка остановки клиента: %s",
+                session_name,
+            )
 
 
-async def restart_session_gracefully(user_id: int, session_name: str, api_id: int, api_hash: str) -> bool:
-    """Плавно перезапускает сессию и фиксирует новый рабочий конфиг."""
+async def run_forwarder_forever(
+    user_id: int,
+    session_name: str,
+    api_id: int,
+    api_hash: str,
+):
+    """
+    Автоматически перезапускает клиент после сетевых ошибок
+    или неожиданного завершения.
+    """
+    retry_delay = 5
+
+    while True:
+        try:
+            enabled = await Database.get_session_posting_status(
+                user_id,
+                session_name,
+            )
+
+            if not enabled:
+                logging.info(
+                    "Пересылка отключена: %s",
+                    session_name,
+                )
+                return
+
+            await start_forwarder_for_session(
+                user_id,
+                session_name,
+                api_id,
+                api_hash,
+            )
+
+            logging.warning(
+                "Forwarder завершился. Повтор через %s секунд",
+                retry_delay,
+            )
+            await asyncio.sleep(retry_delay)
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception:
+            logging.exception(
+                "Ошибка forwarder. Повтор через %s секунд",
+                retry_delay,
+            )
+            await asyncio.sleep(retry_delay)
+
+
+async def restart_session_gracefully(
+    user_id: int,
+    session_name: str,
+    api_id: int,
+    api_hash: str,
+) -> bool:
     task_key = (user_id, session_name)
 
-    if task_key in active_forwarder_tasks:
-        old_task = active_forwarder_tasks.pop(task_key)
+    old_task = active_forwarder_tasks.pop(
+        task_key,
+        None,
+    )
+
+    if old_task:
         old_task.cancel()
+
         try:
             await old_task
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
             pass
+        except Exception:
+            logging.exception(
+                "Ошибка остановки старой задачи"
+            )
 
-    await asyncio.sleep(2.0)
+    await asyncio.sleep(2)
 
-    is_active = await Database.get_session_posting_status(user_id, session_name)
-    if not is_active:
+    enabled = await Database.get_session_posting_status(
+        user_id,
+        session_name,
+    )
+
+    if not enabled:
         running_configs.pop(task_key, None)
         return False
 
-    fresh_configs = await Database.get_session_configs(user_id, session_name)
-    set_running_config(user_id, session_name, fresh_configs)
-
-    new_task = asyncio.create_task(
-        start_forwarder_for_session(user_id, session_name, api_id, api_hash)
+    fresh_config = await Database.get_session_configs(
+        user_id,
+        session_name,
     )
-    active_forwarder_tasks[task_key] = new_task
-    await asyncio.sleep(1.5)
+
+    set_running_config(
+        user_id,
+        session_name,
+        fresh_config,
+    )
+
+    task = asyncio.create_task(
+        run_forwarder_forever(
+            user_id,
+            session_name,
+            api_id,
+            api_hash,
+        ),
+        name=f"forwarder:{user_id}:{session_name}",
+    )
+
+    active_forwarder_tasks[task_key] = task
+
+    await asyncio.sleep(2)
     return True
 
 
-async def _do_restart(user_id: int, session_name: str, api_id: int, api_hash: str):
-    """Внутренняя функция для отложенного перезапуска."""
-    await restart_session_gracefully(user_id, session_name, api_id, api_hash)
-
-
-async def safe_restart_forwarder(user_id: int, session_name: str, api_id: int, api_hash: str, delay: float = 3.0):
+async def safe_restart_forwarder(
+    user_id: int,
+    session_name: str,
+    api_id: int,
+    api_hash: str,
+    delay: float = 3,
+):
     """
-    Отложенный безопасный перезапуск (debounce).
-    Предотвращает множественные перезапуски при серии быстрых кликов.
+    Отложенный перезапуск.
+    Используйте только если действительно нужен
+    автоматический restart.
     """
-    task_key = (user_id, session_name)
+    await asyncio.sleep(delay)
 
-    if task_key in restart_timers:
-        restart_timers[task_key].cancel()
-
-    loop = asyncio.get_running_loop()
-    timer = loop.call_later(
-        delay,
-        lambda: asyncio.create_task(_do_restart(user_id, session_name, api_id, api_hash))
+    await restart_session_gracefully(
+        user_id,
+        session_name,
+        api_id,
+        api_hash,
     )
-    restart_timers[task_key] = timer
-    logging.info(f"Перезапуск сессии '{session_name}' запланирован через {delay} сек.")
 
 
 async def restore_active_forwarders():
-    """Восстановление активных пересылок при старте."""
     try:
-        async with aiosqlite.connect(Database.DB_NAME) as db:
+        async with aiosqlite.connect(
+            Database.DB_NAME
+        ) as db:
             async with db.execute(
-                'SELECT user_id, session_name FROM user_sessions WHERE Enable_posting = TRUE'
+                """
+                SELECT user_id, session_name
+                FROM user_sessions
+                WHERE Enable_posting = 1
+                """
             ) as cursor:
-                active_sessions = await cursor.fetchall()
+                sessions = await cursor.fetchall()
 
-        for user_id, session_name in active_sessions:
+        for user_id, session_name in sessions:
             task_key = (user_id, session_name)
+
             task = asyncio.create_task(
-                start_forwarder_for_session(
-                    user_id=user_id,
-                    session_name=session_name,
-                    api_id=API_ID,
-                    api_hash=API_HASH
-                )
+                run_forwarder_forever(
+                    user_id,
+                    session_name,
+                    API_ID,
+                    API_HASH,
+                ),
+                name=f"forwarder:{user_id}:{session_name}",
             )
+
             active_forwarder_tasks[task_key] = task
-            logging.info(f"Восстановлена задача автопостинга для user={user_id}, session={session_name}")
-    except Exception as e:
-        logging.error(f"Ошибка при восстановлении автопостинга: {e}")
+
+            logging.info(
+                "Автопостинг восстановлен: user=%s, session=%s",
+                user_id,
+                session_name,
+            )
+
+    except Exception:
+        logging.exception(
+            "Ошибка восстановления автопостинга"
+        )
