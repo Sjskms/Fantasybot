@@ -29,12 +29,83 @@ skip_password_kb = InlineKeyboardMarkup(inline_keyboard=[
 
 
 
+def get_forwarding_menu_keyboard(
+    session_name: str,
+    enabled: bool,
+) -> InlineKeyboardMarkup:
+    if enabled:
+        toggle_text = "⏹ Выключить пересылку"
+    else:
+        toggle_text = "▶️ Включить пересылку"
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=toggle_text,
+                callback_data=f"toggle_posting_{session_name}",
+            )
+        ],
+    ]
+
+    if enabled:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="🔄 Перезапустить пересылку",
+                    callback_data=f"restart_posting_{session_name}",
+                )
+            ]
+        )
+
+    buttons.extend(
+        [
+            [
+                InlineKeyboardButton(
+                    text="⚙️ Настройки каналов",
+                    callback_data=f"session_config2_{session_name}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад к сессии",
+                    callback_data=f"select_session_{session_name}",
+                )
+            ],
+        ]
+    )
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    
+    
+def get_text_transform_keyboard(session_name: str, transform_config: dict) -> InlineKeyboardMarkup:
+    mode = transform_config.get("mode", "keep")
+    
+    m_keep = "🔘" if mode == "keep" else "⚪️"
+    m_append = "🔘" if mode == "append" else "⚪️"
+    m_prepend = "🔘" if mode == "prepend" else "⚪️"
+    m_replace = "🔘" if mode == "replace" else "⚪️"
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{m_append} Добавлять в конец", callback_data=f"tt_mode_{session_name}_append")],
+        [InlineKeyboardButton(text=f"{m_prepend} Добавлять в начало", callback_data=f"tt_mode_{session_name}_prepend")],
+        [InlineKeyboardButton(text=f"{m_replace} Заменять текст целиком", callback_data=f"tt_mode_{session_name}_replace")],
+        [InlineKeyboardButton(text=f"{m_keep} Только замены (без добавления)", callback_data=f"tt_mode_{session_name}_keep")],
+        
+        [InlineKeyboardButton(text="📝 Задать кастомный текст (HTML)", callback_data=f"tt_settext_{session_name}")],
+        [InlineKeyboardButton(text="🔄 Добавить замену слова", callback_data=f"tt_addword_{session_name}")],
+        [InlineKeyboardButton(text="🔗 Добавить замену ссылки", callback_data=f"tt_addlink_{session_name}")],
+        [InlineKeyboardButton(text="🗑 Очистить все замены", callback_data=f"tt_clear_{session_name}")],
+        [InlineKeyboardButton(text="⬅️ Назад к сессии", callback_data=f"manage_session_{session_name}")]
+    ])
+    
+    
 def get_session_management_keyboard(
     session_name: str,
     enable_posting: bool,
 ) -> InlineKeyboardMarkup:
     toggle_button_text = (
-        "🔀 Открыть управление пересылкой"
+        "⏹ Выключить пересылку"
         if enable_posting
         else "▶️ Запустить пересылку"
     )
@@ -73,7 +144,7 @@ def get_session_management_keyboard(
             ],
             [
                 InlineKeyboardButton(
-                    text="◀️ Назад к списку",
+                    text="◀️ Назад к списку сессий",
                     callback_data="session_settings",
                 )
             ],
