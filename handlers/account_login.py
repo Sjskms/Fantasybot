@@ -24,6 +24,10 @@ from keyboards.session_kb import (
     get_session_settings_keyboard,
 )
 
+from services.Additional_Feature import (
+    active_forwarder_tasks,
+)
+
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -315,4 +319,69 @@ async def skip_2fa_password(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text("⚙️ Ваши Telegram сессии:", reply_markup=markup)
 
 
+
+
+
+#########_УДАЛЕНИЕ СЕССИЙ #########
+
+
+# ШАГ 1: Показываем окно с подтверждением (Да / Отмена)
+@router.callback_query(F.data.startswith("delete_session_"))
+async def ask_delete_session_confirmation(callback: types.CallbackQuery):
+    session_name = callback.data.replace("delete_session_", "")
+
+    confirm_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="🗑 Да, удалить", 
+                callback_data=f"confirm_delete_session_{session_name}"
+            ),
+            InlineKeyboardButton(
+                text="❌ Отмена", 
+                callback_data=f"session_config_{session_name}"  # Возврат обратно в управление этой сессией
+            )
+        ]
+    ])
+
+    text = (
+        f"⚠️ <b>Подтверждение удаления</b>\n\n"
+        f"Вы действительно хотите удалить сессию <code>{session_name}</code>?\n"
+        f"Все сохраненные настройки фильтров и каналов будут удалены безвозвратно."
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=confirm_keyboard, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
+
+    await callback.answer()
+
+
+# ШАГ 2: Удаление сессии, остановка юзербота и возврат к обновленному списку
+@router.callback_query(F.data.startswith("confirm_delete_session_"))
+async def process_confirmed_delete_session(callback: types.CallbackQuery):
+    session_name = callback.data.replace("confirm_delete_session_", "")
+    user_id = callback.from_user.id
+    task_key = (user_id, session_name)
+
+    # 1. Если для этой сессии работал автопостинг — останавливаем его
+    if task_key in active_forwarder_tasks:
+        task = active_forwarder_tasks.pop(task_key)
+        task.cancel()
+
+    # 2. Удаляем из БД
+    await Database.delete_session(user_id, session_name)
+    await callback.answer(f"Сессия '{session_name}' успешно удалена.", show_alert=True)
+
+    # 3. Получаем свежий список сессий и перерисовываем исходное меню
+    user_sessions = await Database.get_user_sessions(user_id)
+    markup = get_session_settings_keyboard(user_sessions)
+    
+    try:
+        await callback.message.edit_text("⚙️ Ваши Telegram сессии:", reply_markup=markup)
+    except TelegramBadRequest:
+        pass
+
+####################
+    
 
