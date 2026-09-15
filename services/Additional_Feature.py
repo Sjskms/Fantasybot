@@ -25,7 +25,8 @@ running_configs: dict[tuple[int, str], dict] = {}
 media_group_buffers: dict[str, dict] = {}
 
 bot_instance = None
-
+client_instances: dict[tuple[int, str], Client] = {}
+client_locks: dict[tuple[int, str], asyncio.Lock] = {}
 
 def set_bot_instance(bot):
     global bot_instance
@@ -48,6 +49,35 @@ def has_session_unapplied_changes(
 
     return running != (current_db_config or {})
 
+
+
+
+async def stop_forwarder(
+    user_id: int,
+    session_name: str,
+) -> None:
+    task_key = (user_id, session_name)
+    client = client_instances.pop(task_key, None)
+
+    if client is None:
+        return
+
+    try:
+        if client.is_connected:
+            await client.stop()
+
+        logging.info(
+            "Pyrogram-клиент остановлен: %s",
+            session_name,
+        )
+
+    except Exception:
+        logging.exception(
+            "Ошибка остановки клиента: %s",
+            session_name,
+        )
+        
+        
 
 async def update_live_config(user_id: int, session_name: str):
     """
@@ -438,11 +468,16 @@ async def start_forwarder_for_session(
     )
 
     if not session_string:
-        logging.error("Строка сессии не найдена: %s", session_name)
+        logging.error(
+            "Строка сессии не найдена: %s",
+            session_name,
+        )
         return
 
-    # Конфиг загружается один раз при запуске клиента.
-    await update_live_config(user_id, session_name)
+    await update_live_config(
+        user_id,
+        session_name,
+    )
 
     session_config = loaded_configs.get(
         (user_id, session_name),
@@ -463,7 +498,27 @@ async def start_forwarder_for_session(
         in_memory=True,
     )
 
-    async def message_handler(client: Client, message: Message):
+    task_key = (user_id, session_name)
+
+    # Не допускаем два клиента для одной сессии
+    old_client = client_instances.get(task_key)
+
+    if old_client is not None:
+        try:
+            if old_client.is_connected:
+                await old_client.stop()
+        except Exception:
+            logging.exception(
+                "Ошибка остановки старого клиента: %s",
+                session_name,
+            )
+
+    client_instances[task_key] = app
+
+    async def message_handler(
+        client: Client,
+        message: Message,
+    ):
         full_config = copy.deepcopy(
             loaded_configs.get(
                 (user_id, session_name),
@@ -472,19 +527,31 @@ async def start_forwarder_for_session(
         )
 
         try:
-            channels_config = full_config.get("channels", {})
+            channels_config = full_config.get(
+                "channels",
+                {},
+            )
 
             export_channels = get_export_channels(
-                channels_config
+                channels_config,
             )
 
             target_chats = get_post_channels(
-                channels_config
+                channels_config,
             )
+
+            if not message.chat:
+                logging.warning(
+                    "Сообщение без чата: %s",
+                    getattr(message, "id", None),
+                )
+                return
 
             source_chat_id = int(message.chat.id)
 
-            export_mode = export_channels.get(source_chat_id)
+            export_mode = export_channels.get(
+                source_chat_id,
+            )
 
             if export_mode is None:
                 logging.info(
@@ -534,6 +601,7 @@ async def start_forwarder_for_session(
                 ),
             )
 
+            # Обработка альбома
             if message.media_group_id:
                 buffer_key = (
                     f"{source_chat_id}:"
@@ -564,7 +632,9 @@ async def start_forwarder_for_session(
 
                 return
 
-            original_html, is_media = get_message_html(message)
+            original_html, is_media = get_message_html(
+                message,
+            )
 
             new_text = transform_text(
                 original_html,
@@ -572,9 +642,12 @@ async def start_forwarder_for_session(
                 is_media=is_media,
             )
 
+            # ВАЖНО: этот цикл должен быть внутри message_handler
             for target_chat_id in target_chats:
                 try:
-                    if not is_transform_needed(transform_config):
+                    if not is_transform_needed(
+                        transform_config,
+                    ):
                         await message.copy(
                             chat_id=target_chat_id,
                         )
@@ -627,7 +700,7 @@ async def start_forwarder_for_session(
 
         except Exception as error:
             logging.exception(
-                "Критическая ошибка обработки сообщения"
+                "Критическая ошибка обработки сообщения",
             )
 
             await send_user_log(
@@ -641,7 +714,7 @@ async def start_forwarder_for_session(
             )
 
     app.add_handler(
-        MessageHandler(message_handler)
+        MessageHandler(message_handler),
     )
 
     try:
@@ -677,12 +750,12 @@ async def start_forwarder_for_session(
         raise
 
     finally:
-        try:
-            if app.is_connected:
-                await app.stop()
-        except Exception:
-            logging.exception(
-                "Ошибка остановки клиента: %s",
+        # Закрываем только текущий клиент
+        current_client = client_instances.get(task_key)
+
+        if current_client is app:
+            await stop_forwarder(
+                user_id,
                 session_name,
             )
 
