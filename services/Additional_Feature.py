@@ -2,6 +2,7 @@ import asyncio
 import copy
 import logging
 import re
+from html import escape
 import aiosqlite
 
 from pyrogram import Client
@@ -256,6 +257,31 @@ def get_post_channels(channels_config: dict) -> list[int]:
     return result
 
 
+def get_channel_title(chat_id: int, channels_config: dict, fallback_title: str = None) -> str:
+    """Возвращает название канала из конфигурации или запасное имя."""
+    raw_id = str(chat_id)
+    cdata = channels_config.get(raw_id, {})
+    title = cdata.get("title") or fallback_title or f"Канал {chat_id}"
+    return escape(str(title))
+
+
+def make_message_link(chat_id: int, message_id: int, username: str = None) -> str:
+    """Генерирует ссылку на сообщение в Telegram (публичную или приватную)."""
+    if username:
+        clean_user = username.lstrip("@")
+        return f"https://t.me/{clean_user}/{message_id}"
+    
+    # Для приватных каналов/супергрупп (ID начинается с -100)
+    str_id = str(chat_id)
+    if str_id.startswith("-100"):
+        internal_id = str_id[4:]
+        return f"https://t.me/c/{internal_id}/{message_id}"
+    
+    # Для обычных групп/чатов
+    clean_id = str_id.lstrip("-")
+    return f"https://t.me/c/{clean_id}/{message_id}"
+
+
 async def forward_album_delayed(
     buffer_key: str,
     client: Client,
@@ -278,15 +304,31 @@ async def forward_album_delayed(
         return
 
     messages.sort(key=lambda item: item.id)
+    channels_cfg = session_configs.get("channels", {})
+    
+    source_title = get_channel_title(
+        source_chat,
+        channels_cfg,
+        fallback_title=getattr(messages[0].chat, "title", None)
+    )
+    src_link = make_message_link(
+        source_chat,
+        messages[0].id,
+        getattr(messages[0].chat, "username", None)
+    )
 
     for target_chat_id in target_chats:
+        target_title = get_channel_title(target_chat_id, channels_cfg)
         try:
+            sent_msg_id = None
             if not is_transform_needed(transform_config):
-                await client.copy_media_group(
+                copied = await client.copy_media_group(
                     chat_id=target_chat_id,
                     from_chat_id=source_chat,
                     message_id=messages[0].id,
                 )
+                if copied and isinstance(copied, list) and len(copied) > 0:
+                    sent_msg_id = copied[0].id
             else:
                 original_caption = ""
                 for message in messages:
@@ -340,21 +382,26 @@ async def forward_album_delayed(
                         )
 
                 if media:
-                    await client.send_media_group(
+                    sent = await client.send_media_group(
                         chat_id=target_chat_id,
                         media=media,
                     )
+                    if sent and isinstance(sent, list) and len(sent) > 0:
+                        sent_msg_id = sent[0].id
 
-            await send_user_log(
-                user_id,
-                "success",
-                (
-                    "✅ <b>Альбом переслан</b>\n"
-                    f"Источник: <code>{source_chat}</code>\n"
-                    f"Цель: <code>{target_chat_id}</code>"
-                ),
-                session_configs,
+            # Ссылка на отправленное сообщение в канале постинга (если доступен ID)
+            if sent_msg_id:
+                dest_link = make_message_link(target_chat_id, sent_msg_id)
+                dest_str = f"<b>{target_title}</b> [<code>{target_chat_id}</code>] (<a href='{dest_link}'>#{sent_msg_id}</a>)"
+            else:
+                dest_str = f"<b>{target_title}</b> [<code>{target_chat_id}</code>]"
+
+            log_msg = (
+                f"✅ <b>Альбом переслан</b> ({len(messages)} медиа)\n"
+                f"📤 <b>Из:</b> <b>{source_title}</b> [<code>{source_chat}</code>] (<a href='{src_link}'>#{messages[0].id}</a>)\n"
+                f"📥 <b>В:</b> {dest_str}"
             )
+            await send_user_log(user_id, "success", log_msg, session_configs)
 
         except Exception as error:
             logging.exception("Ошибка отправки альбома в канал %s", target_chat_id)
@@ -362,10 +409,10 @@ async def forward_album_delayed(
                 user_id,
                 "error",
                 (
-                    "❌ <b>Ошибка отправки альбома</b>\n"
-                    f"Источник: <code>{source_chat}</code>\n"
-                    f"Цель: <code>{target_chat_id}</code>\n"
-                    f"Ошибка: <code>{error}</code>"
+                    f"❌ <b>Ошибка отправки альбома</b>\n"
+                    f"📤 <b>Из:</b> <b>{source_title}</b> [<code>{source_chat}</code>]\n"
+                    f"📥 <b>В:</b> <b>{target_title}</b> [<code>{target_chat_id}</code>]\n"
+                    f"⚠️ <b>Ошибка:</b> <code>{escape(str(error))}</code>"
                 ),
                 session_configs,
             )
@@ -427,19 +474,26 @@ async def start_forwarder_for_session(
             if not target_chats:
                 return
 
+            source_title = get_channel_title(
+                source_chat_id,
+                channels_config,
+                fallback_title=getattr(message.chat, "title", None)
+            )
+            src_link = make_message_link(
+                source_chat_id,
+                message.id,
+                getattr(message.chat, "username", None)
+            )
+
             export_filters = export_mode.get("filters", {})
             if not is_message_allowed(message, export_filters):
                 logging.info("Сообщение %s из чата %s отфильтровано", message.id, source_chat_id)
-                await send_user_log(
-                    user_id,
-                    "filtered",
-                    (
-                        "ℹ️ <b>Сообщение отфильтровано</b>\n"
-                        f"Источник: <code>{source_chat_id}</code>\n"
-                        f"ID: <code>{message.id}</code>"
-                    ),
-                    full_config,
+                log_msg = (
+                    f"ℹ️ <b>Сообщение отфильтровано</b>\n"
+                    f"📤 <b>Канал:</b> <b>{source_title}</b> [<code>{source_chat_id}</code>]\n"
+                    f"🔗 <b>Пост:</b> <a href='{src_link}'>#{message.id}</a>"
                 )
+                await send_user_log(user_id, "filtered", log_msg, full_config)
                 return
 
             transform_config = export_mode.get(
@@ -478,34 +532,38 @@ async def start_forwarder_for_session(
             )
 
             for target_chat_id in target_chats:
+                target_title = get_channel_title(target_chat_id, channels_config)
                 try:
+                    sent_msg = None
                     if not is_transform_needed(transform_config):
-                        await message.copy(chat_id=target_chat_id)
+                        sent_msg = await message.copy(chat_id=target_chat_id)
                     elif not is_media:
-                        await client.send_message(
+                        sent_msg = await client.send_message(
                             chat_id=target_chat_id,
                             text=new_text,
                             parse_mode=ParseMode.HTML,
                             disable_web_page_preview=False,
                         )
                     else:
-                        await message.copy(
+                        sent_msg = await message.copy(
                             chat_id=target_chat_id,
                             caption=new_text,
                             parse_mode=ParseMode.HTML,
                         )
 
-                    await send_user_log(
-                        user_id,
-                        "success",
-                        (
-                            "✅ <b>Сообщение переслано</b>\n"
-                            f"Источник: <code>{source_chat_id}</code>\n"
-                            f"Цель: <code>{target_chat_id}</code>\n"
-                            f"ID: <code>{message.id}</code>"
-                        ),
-                        full_config,
+                    # Ссылка на отправленное сообщение в канале постинга
+                    if sent_msg and hasattr(sent_msg, "id"):
+                        dest_link = make_message_link(target_chat_id, sent_msg.id)
+                        dest_str = f"<b>{target_title}</b> [<code>{target_chat_id}</code>] (<a href='{dest_link}'>#{sent_msg.id}</a>)"
+                    else:
+                        dest_str = f"<b>{target_title}</b> [<code>{target_chat_id}</code>]"
+
+                    log_msg = (
+                        f"✅ <b>Сообщение переслано</b>\n"
+                        f"📤 <b>Из:</b> <b>{source_title}</b> [<code>{source_chat_id}</code>] (<a href='{src_link}'>#{message.id}</a>)\n"
+                        f"📥 <b>В:</b> {dest_str}"
                     )
+                    await send_user_log(user_id, "success", log_msg, full_config)
 
                 except Exception as error:
                     logging.exception(
@@ -517,10 +575,10 @@ async def start_forwarder_for_session(
                         user_id,
                         "error",
                         (
-                            "❌ <b>Ошибка отправки</b>\n"
-                            f"Источник: <code>{source_chat_id}</code>\n"
-                            f"Цель: <code>{target_chat_id}</code>\n"
-                            f"Ошибка: <code>{error}</code>"
+                            f"❌ <b>Ошибка отправки</b>\n"
+                            f"📤 <b>Из:</b> <b>{source_title}</b> [<code>{source_chat_id}</code>] (<a href='{src_link}'>#{message.id}</a>)\n"
+                            f"📥 <b>В:</b> <b>{target_title}</b> [<code>{target_chat_id}</code>]\n"
+                            f"⚠️ <b>Ошибка:</b> <code>{escape(str(error))}</code>"
                         ),
                         full_config,
                     )
@@ -530,7 +588,7 @@ async def start_forwarder_for_session(
             await send_user_log(
                 user_id,
                 "error",
-                f"❌ <b>Критическая ошибка обработки</b>\nОшибка: <code>{error}</code>",
+                f"❌ <b>Критическая ошибка обработки</b>\nОшибка: <code>{escape(str(error))}</code>",
                 full_config,
             )
 
@@ -541,10 +599,8 @@ async def start_forwarder_for_session(
 
         logging.info("Pyrogram-клиент запущен: %s. Подгружаем все диалоги и каналы...", session_name)
 
-        # Решение проблемы: форсированный обход абсолютно всех диалогов, каналов и групп,
-        # чтобы Pyrogram зафиксировал хэндлы и начал принимать апдейты из чужих каналов (где юзер — не админ).
+        # Решение проблемы: форсированный обход диалогов для заполнения access_hash сторонних каналов
         async for dialog in app.get_dialogs():
-            # Если диалог — канал или супергруппа, обращаемся к нему, чтобы обновился локальный хэндл/кэш пиров
             if dialog.chat and dialog.chat.id:
                 try:
                     await client_instances[task_key].get_chat(dialog.chat.id)
@@ -638,8 +694,6 @@ async def safe_restart_forwarder(
     api_hash: str,
     delay: float = 3.0,
 ):
-    """жОтложенный перезапуск сессии."""
-    file_name = "services/Additional_Feature.py"
     """Отложенный перезапуск сессии."""
     await asyncio.sleep(delay)
     await restart_session_gracefully(user_id, session_name, api_id, api_hash)
@@ -662,7 +716,7 @@ async def restore_active_forwarders():
             task_key = (user_id, session_name)
             task = asyncio.create_task(
                 run_forwarder_forever(user_id, session_name, API_ID, API_HASH),
-                name=f"forwarder:{user_id}",
+                name=f"forwarder:{user_id}:{session_name}",
             )
             active_forwarder_tasks[task_key] = task
             logging.info("Автопостинг восстановлен: user=%s, session=%s", user_id, session_name)
