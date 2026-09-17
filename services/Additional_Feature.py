@@ -539,13 +539,19 @@ async def start_forwarder_for_session(
     try:
         await app.start()
 
-        logging.info("Pyrogram-клиент запущен: %s. Прогреваем кэш каналов...", session_name)
+        logging.info("Pyrogram-клиент запущен: %s. Подгружаем все диалоги и каналы...", session_name)
 
-        # Ключевой шаг: загрузка кэша пиров всех каналов (актуально и для не-админских каналов)
+        # Решение проблемы: форсированный обход абсолютно всех диалогов, каналов и групп,
+        # чтобы Pyrogram зафиксировал хэндлы и начал принимать апдейты из чужих каналов (где юзер — не админ).
         async for dialog in app.get_dialogs():
-            pass
+            # Если диалог — канал или супергруппа, обращаемся к нему, чтобы обновился локальный хэндл/кэш пиров
+            if dialog.chat and dialog.chat.id:
+                try:
+                    await client_instances[task_key].get_chat(dialog.chat.id)
+                except Exception:
+                    pass
 
-        logging.info("Кэш каналов для сессии '%s' успешно сформирован!", session_name)
+        logging.info("Кэш пиров каналов для сессии '%s' полностью сформирован!", session_name)
         await asyncio.Event().wait()
 
     except asyncio.CancelledError:
@@ -632,6 +638,8 @@ async def safe_restart_forwarder(
     api_hash: str,
     delay: float = 3.0,
 ):
+    """жОтложенный перезапуск сессии."""
+    file_name = "services/Additional_Feature.py"
     """Отложенный перезапуск сессии."""
     await asyncio.sleep(delay)
     await restart_session_gracefully(user_id, session_name, api_id, api_hash)
@@ -654,7 +662,7 @@ async def restore_active_forwarders():
             task_key = (user_id, session_name)
             task = asyncio.create_task(
                 run_forwarder_forever(user_id, session_name, API_ID, API_HASH),
-                name=f"forwarder:{user_id}:{session_name}",
+                name=f"forwarder:{user_id}",
             )
             active_forwarder_tasks[task_key] = task
             logging.info("Автопостинг восстановлен: user=%s, session=%s", user_id, session_name)
