@@ -197,13 +197,25 @@ def is_message_allowed(message: Message, export_filters: dict) -> bool:
         enabled, min_val, max_val = get_rules("text")
         return enabled and min_val <= len(message.text) <= max_val
 
+        # Фото
     if message.photo:
         enabled, min_val, max_val = get_rules("photos")
+        # Если в базе стоял старый лимит 999999, расширяем его до 2 ГБ
+        if max_val == 999999:
+            max_val = 2000000000
         return enabled and min_val <= (message.photo.file_size or 0) <= max_val
 
-    if message.video:
+    # Видео и GIF/Анимации
+    if message.video or message.animation:
         enabled, min_val, max_val = get_rules("videos")
-        return enabled and min_val <= (message.video.duration or 0) <= max_val
+        dur = 0
+        if message.video:
+            dur = message.video.duration or 0
+        elif message.animation:
+            dur = message.animation.duration or 0
+        return enabled and min_val <= dur <= max_val
+
+    
 
     if message.video_note:
         enabled, min_val, max_val = get_rules("video_notes")
@@ -217,8 +229,11 @@ def is_message_allowed(message: Message, export_filters: dict) -> bool:
         enabled, min_val, max_val = get_rules("music")
         return enabled and min_val <= (message.audio.duration or 0) <= max_val
 
+    # Документы (файлы, несжатые фото и гифки)
     if message.document:
         enabled, min_val, max_val = get_rules("documents")
+        if max_val == 999999:
+            max_val = 2000000000
         return enabled and min_val <= (message.document.file_size or 0) <= max_val
 
     return False
