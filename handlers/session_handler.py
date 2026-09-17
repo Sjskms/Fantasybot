@@ -118,12 +118,12 @@ def get_enabled_filter_names(filters: dict) -> list[str]:
 
 def get_default_filters():
     return {
-        "photos": {"enabled": True, "min": 0, "max": 999999},
-        "videos": {"enabled": True, "min": 0, "max": 999999},
-        "text": {"enabled": True, "min": 0, "max": 999999},
-        "documents": {"enabled": False, "min": 0, "max": 999999},
-        "music": {"enabled": False, "min": 0, "max": 999999},
-        "voices": {"enabled": False, "min": 0, "max": 999999},
+        "photos": {"enabled": True, "min": 0, "max": 2000000000},       # До 2 ГБ
+        "videos": {"enabled": True, "min": 0, "max": 999999},           # До 11 дней длительности
+        "text": {"enabled": True, "min": 0, "max": 999999},             # До 999 тыс. символов
+        "documents": {"enabled": True, "min": 0, "max": 2000000000},     # Разрешаем файлы и несжатые фото
+        "music": {"enabled": True, "min": 0, "max": 999999},
+        "voices": {"enabled": True, "min": 0, "max": 999999},
         "video_notes": {"enabled": True, "min": 0, "max": 999999},
     }
 
@@ -907,6 +907,7 @@ async def toggle_channel_selection(callback: CallbackQuery, state: FSMContext):
         message_text = "Канал выбран."
 
     await Database.update_session_configs(user_id, session_name, session_configs)
+    await update_live_config(user_id, session_name)
     await state.update_data(selected_channels_ids=selected_channels_ids)
 
     updated_configs = await Database.get_session_configs(user_id, session_name)
