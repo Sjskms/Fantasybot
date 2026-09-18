@@ -33,6 +33,9 @@ loaded_configs: dict[tuple[int, str], dict] = {}
 running_configs: dict[tuple[int, str], dict] = {}
 media_group_buffers: dict[str, dict] = {}
 client_instances: dict[tuple[int, str], Client] = {}
+# Защита от повторной пересылки одних и тех же постов
+processed_messages: set[tuple[int, int]] = set()
+last_known_msg_ids: dict[int, int] = {}
 
 bot_instance = None
 
@@ -45,34 +48,75 @@ def set_bot_instance(bot):
     
 async def keep_channels_alive(client: Client, user_id: int, session_name: str):
     """
-    Фоновая задача: каждые 45 секунд опрашивает каналы экспорта.
-    Это заставляет Telegram передавать события из каналов, где аккаунт не админ.
+    Фоновый детектор новых постов:
+    Гарантированно забирает новые посты из чужих каналов (даже если канал замьючен и нет пушей).
     """
-    await asyncio.sleep(5) # Ждем полного старта клиента
+    logging.info("Фоновый поллер каналов для '%s' активирован.", session_name)
+    await asyncio.sleep(3)
+
+    # 1. Запоминаем текущие последние ID постов, чтобы не пересылать старое
+    try:
+        full_cfg = loaded_configs.get((user_id, session_name), {})
+        exp_channels = get_export_channels(full_cfg.get("channels", {}))
+        for ch_id in exp_channels.keys():
+            try:
+                async for msg in client.get_chat_history(ch_id, limit=1):
+                    last_known_msg_ids[ch_id] = msg.id
+                    processed_messages.add((ch_id, msg.id))
+                    break
+            except Exception:
+                pass
+        logging.info("Базовые ID для каналов зафиксированы: %s", last_known_msg_ids)
+    except Exception as e:
+        logging.error("Ошибка первичного опроса каналов: %s", e)
+
+    # 2. Постоянный цикл проверки новых публикаций раз в 12 секунд
     while client.is_connected:
         try:
-            full_config = loaded_configs.get((user_id, session_name), {})
-            channels_config = full_config.get("channels", {})
-            export_channels = get_export_channels(channels_config)
+            await asyncio.sleep(12)
 
-            for chat_id in export_channels.keys():
+            full_cfg = loaded_configs.get((user_id, session_name), {})
+            exp_channels = get_export_channels(full_cfg.get("channels", {}))
+
+            for ch_id in exp_channels.keys():
                 try:
-                    # Запрашиваем последнее сообщение чата. 
-                    # Это заставляет MTProto обновить PTS канала и включить подписку на апдейты!
-                    async for _ in client.get_chat_history(chat_id, limit=1):
-                        break
-                    await asyncio.sleep(1) # Небольшая пауза между каналами от флуда
-                except Exception as e:
-                    logging.debug(f"Ошибка пинга канала {chat_id}: {e}")
+                    # Запрашиваем 5 последних постов
+                    new_msgs = []
+                    async for msg in client.get_chat_history(ch_id, limit=5):
+                        last_id = last_known_msg_ids.get(ch_id, 0)
+                        
+                        # Если наткнулись на уже известный старый пост — глубже не идем
+                        if msg.id <= last_id or (ch_id, msg.id) in processed_messages:
+                            break
+                        new_msgs.append(msg)
 
-            # Опрашиваем раз в 45 секунд
-            await asyncio.sleep(45)
+                    if new_msgs:
+                        # Сортируем от старых к новым, чтобы посты шли по порядку
+                        new_msgs.sort(key=lambda m: m.id)
+                        for m in new_msgs:
+                            processed_messages.add((ch_id, m.id))
+                            last_known_msg_ids[ch_id] = max(last_known_msg_ids.get(ch_id, 0), m.id)
+
+                            logging.info(
+                                "🔥 Обнаружен новый пост #%s в чужом канале %s через фоновый опрос!",
+                                m.id,
+                                ch_id
+                            )
+                            # Передаем в наш обработчик на проверку фильтров и пересылку
+                            asyncio.create_task(
+                                handle_incoming_message(client, m, user_id, session_name)
+                            )
+
+                    await asyncio.sleep(0.5)
+
+                except Exception as ch_err:
+                    logging.debug("Ошибка опроса канала %s: %s", ch_id, ch_err)
 
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logging.error(f"Ошибка в цикле keep_channels_alive: {e}")
-            await asyncio.sleep(30)
+            logging.error("Сбой в цикле опроса: %s", e)
+            await asyncio.sleep(10)
             
                 
                         
@@ -687,6 +731,26 @@ async def forward_single_message(
 
 async def handle_incoming_message(client: Client, message: Message, user_id: int, session_name: str):
     """Основной обработчик события входящего сообщения: фильтрация и маршрутизация."""
+    if not message.chat:
+        return
+
+    source_chat_id = int(message.chat.id)
+    msg_key = (source_chat_id, message.id)
+
+    # --- ЗАЩИТА ОТ ДУБЛИКАТОВ ---
+    if msg_key in processed_messages:
+        # Сообщение уже обрабатывается или было обработано
+        return
+    
+    # Добавляем в реестр обработанных
+    processed_messages.add(msg_key)
+
+    # Очистка старых ID, если их стало слишком много (больше 10 000), чтобы не забивать ОЗУ
+    if len(processed_messages) > 10000:
+        processed_messages.clear()
+        processed_messages.add(msg_key) # Сохраняем текущее после очистки
+    # ----------------------------
+
     full_config = copy.deepcopy(loaded_configs.get((user_id, session_name), {}))
 
     try:
@@ -694,13 +758,9 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
         export_channels = get_export_channels(channels_config)
         target_chats = get_post_channels(channels_config)
 
-        if not message.chat:
-            return
-
-        source_chat_id = int(message.chat.id)
         export_mode = export_channels.get(source_chat_id)
 
-        # Сообщение пришло из канала, которого нет в экспорте
+        # Сообщение пришло из канала, которого нет в экспорте или некуда постить
         if export_mode is None or not target_chats:
             return
 
@@ -763,6 +823,7 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
 
     except Exception as error:
         logging.exception("Критическая ошибка обработки сообщения")
+        # Сообщаем об ошибке, если логи включены
         await send_user_log(
             user_id,
             "error",
