@@ -4,6 +4,9 @@ import logging
 import re
 from html import escape
 import aiosqlite
+from html import escape
+
+import requests
 
 from pyrogram import Client
 from pyrogram.enums import ParseMode
@@ -16,8 +19,13 @@ from pyrogram.types import (
     InputMediaDocument,
 )
 
-from config import API_ID, API_HASH
 from database import Database
+
+import config
+
+API_ID = config.API_ID
+API_HASH = config.API_HASH
+ADMIN_ID = getattr(config, "ADMIN_ID", [])
 
 # --- ГЛОБАЛЬНЫЕ РЕЕСТРЫ СОСТОЯНИЯ ---
 active_forwarder_tasks: dict[tuple[int, str], asyncio.Task] = {}
@@ -34,7 +42,29 @@ def set_bot_instance(bot):
     global bot_instance
     bot_instance = bot
 
+async def send_debug_log(text: str) -> None:
+    """
+    Временный диагностический лог.
+    Отправляет сообщения администраторам независимо от настроек logging.
+    """
+    if not bot_instance:
+        logging.warning("bot_instance еще не установлен")
+        return
 
+    if not ADMIN_ID:
+        logging.warning("ADMIN_ID не настроен")
+        return
+
+    await bot_instance.send_message(
+                chat_id=ADMIN_ID,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+    
+            
+            
+            
 def set_running_config(user_id: int, session_name: str, config: dict):
     """Фиксирует точный снимок конфигурации, на которой запущен юзербот."""
     running_configs[(user_id, session_name)] = copy.deepcopy(config or {})
@@ -177,81 +207,162 @@ def transform_text(
 
 
 def is_message_allowed(message: Message, export_filters: dict) -> bool:
-    """Проверяет соответствие сообщения заданным фильтрам (размер, длительность, тип)."""
     if not isinstance(export_filters, dict):
+        logging.warning(
+            "Фильтры имеют неправильный тип: %s",
+            type(export_filters).__name__,
+        )
         return False
 
     def get_rules(key: str):
         value = export_filters.get(key, {})
+
         if isinstance(value, dict):
+            try:
+                min_value = int(value.get("min", 0))
+                max_value = int(value.get("max", 999999999))
+            except (TypeError, ValueError):
+                min_value = 0
+                max_value = 999999999
+
             return (
                 bool(value.get("enabled", False)),
-                int(value.get("min", 0)),
-                int(value.get("max", 999999999)),
+                min_value,
+                max_value,
             )
+
         if isinstance(value, bool):
             return value, 0, 999999999
+
         return False, 0, 999999999
 
     if message.text and not message.media:
-        enabled, min_val, max_val = get_rules("text")
-        return enabled and min_val <= len(message.text) <= max_val
+        enabled, min_value, max_value = get_rules("text")
+        length = len(message.text)
 
-        # Фото
+        logging.info(
+            "Проверка text: enabled=%s, length=%s, range=%s-%s",
+            enabled,
+            length,
+            min_value,
+            max_value,
+        )
+
+        return enabled and min_value <= length <= max_value
+
+    if message.video:
+        enabled, min_value, max_value = get_rules("videos")
+        duration = message.video.duration or 0
+
+        logging.info(
+            "Проверка video: enabled=%s, duration=%s, range=%s-%s",
+            enabled,
+            duration,
+            min_value,
+            max_value,
+        )
+
+        return enabled and min_value <= duration <= max_value
+
     if message.photo:
-        enabled, min_val, max_val = get_rules("photos")
-        # Если в базе стоял старый лимит 999999, расширяем его до 2 ГБ
-        if max_val == 999999:
-            max_val = 2000000000
-        return enabled and min_val <= (message.photo.file_size or 0) <= max_val
+        enabled, min_value, max_value = get_rules("photos")
+        file_size = message.photo.file_size or 0
 
-    # Видео и GIF/Анимации
-    if message.video or message.animation:
-        enabled, min_val, max_val = get_rules("videos")
-        dur = 0
-        if message.video:
-            dur = message.video.duration or 0
-        elif message.animation:
-            dur = message.animation.duration or 0
-        return enabled and min_val <= dur <= max_val
+        logging.info(
+            "Проверка photo: enabled=%s, size=%s, range=%s-%s",
+            enabled,
+            file_size,
+            min_value,
+            max_value,
+        )
 
-    
+        return enabled and min_value <= file_size <= max_value
 
     if message.video_note:
-        enabled, min_val, max_val = get_rules("video_notes")
-        return enabled and min_val <= (message.video_note.duration or 0) <= max_val
+        enabled, min_value, max_value = get_rules("video_notes")
+        duration = message.video_note.duration or 0
+
+        return enabled and min_value <= duration <= max_value
 
     if message.voice:
-        enabled, min_val, max_val = get_rules("voices")
-        return enabled and min_val <= (message.voice.duration or 0) <= max_val
+        enabled, min_value, max_value = get_rules("voices")
+        duration = message.voice.duration or 0
+
+        return enabled and min_value <= duration <= max_value
 
     if message.audio:
-        enabled, min_val, max_val = get_rules("music")
-        return enabled and min_val <= (message.audio.duration or 0) <= max_val
+        enabled, min_value, max_value = get_rules("music")
+        duration = message.audio.duration or 0
 
-    # Документы (файлы, несжатые фото и гифки)
+        return enabled and min_value <= duration <= max_value
+
     if message.document:
-        enabled, min_val, max_val = get_rules("documents")
-        if max_val == 999999:
-            max_val = 2000000000
-        return enabled and min_val <= (message.document.file_size or 0) <= max_val
+        enabled, min_value, max_value = get_rules("documents")
+        file_size = message.document.file_size or 0
 
+        return enabled and min_value <= file_size <= max_value
+
+    logging.info(
+        "Сообщение %s имеет неподдерживаемый тип медиа",
+        getattr(message, "id", None),
+    )
     return False
 
 
 def get_export_channels(channels_config: dict) -> dict[int, dict]:
-    """Извлекает каналы, из которых включен экспорт (источники)."""
+    """
+    Возвращает все каналы, у которых включен режим export.
+
+    Результат:
+    {
+        -1001234567890: {
+            "enabled": True,
+            "filters": {...}
+        }
+    }
+    """
     result = {}
+
+    if not isinstance(channels_config, dict):
+        logging.error(
+            "Раздел channels имеет неправильный тип: %s",
+            type(channels_config).__name__,
+        )
+        return result
+
     for raw_id, channel_data in channels_config.items():
         try:
-            chat_id = int(raw_id)
+            chat_id = int(str(raw_id).strip())
         except (TypeError, ValueError):
-            logging.warning("Некорректный ID канала: %r", raw_id)
+            logging.warning(
+                "Некорректный ID канала в session_configs_json: %r",
+                raw_id,
+            )
             continue
 
-        export_mode = channel_data.get("modes", {}).get("export", {})
-        if isinstance(export_mode, dict) and export_mode.get("enabled", False):
+        if not isinstance(channel_data, dict):
+            logging.warning(
+                "Конфигурация канала %s имеет неправильный тип",
+                chat_id,
+            )
+            continue
+
+        modes = channel_data.get("modes", {})
+        if not isinstance(modes, dict):
+            continue
+
+        export_mode = modes.get("export", {})
+        if not isinstance(export_mode, dict):
+            continue
+
+        if export_mode.get("enabled", False):
             result[chat_id] = export_mode
+
+            logging.info(
+                "Активный источник экспорта: id=%s, title=%s",
+                chat_id,
+                channel_data.get("title", "Без названия"),
+            )
 
     return result
 
@@ -471,7 +582,11 @@ async def start_forwarder_for_session(
     client_instances[task_key] = app
 
     async def message_handler(client: Client, message: Message):
-        full_config = copy.deepcopy(loaded_configs.get((user_id, session_name), {}))
+        full_config = copy.deepcopy(
+        loaded_configs.get(
+        (user_id, session_name),
+        )
+         )
 
         try:
             channels_config = full_config.get("channels", {})
@@ -482,12 +597,45 @@ async def start_forwarder_for_session(
                 return
 
             source_chat_id = int(message.chat.id)
+            source_title = getattr(
+            message.chat,
+            "title",
+            "Без названия",
+            )
+            await send_debug_log(
+            (
+                "📡 <b>Получено новое сообщение</b>\n"
+                f"Канал: <b>{escape(str(source_title))}</b>\n"
+                f"ID канала: <code>{source_chat_id}</code>\n"
+                f"ID сообщения: <code>{message.id}</code>\n"
+                f"Тип: <code>{escape(str(message.media or 'text'))}</code>\n"
+                f"Видео: <code>{bool(message.video)}</code>\n"
+                f"Группа: <code>{escape(str(message.media_group_id or '-'))}</code>"
+            )
+            )
+            logging.info(
+            "Активные export-каналы: %s",
+            list(export_channels.keys()),
+             )
             export_mode = export_channels.get(source_chat_id)
+            
             if export_mode is None:
-                return
-
+            	await send_debug_log(
+            	(
+                    "⚠️ <b>Сообщение получено, но канал не выбран для экспорта</b>\n"
+                    f"Канал: <b>{escape(str(source_title))}</b>\n"
+                    f"ID канала: <code>{source_chat_id}</code>\n"
+                    "Проверьте ID в session_configs_json."
+            	)
+            	)
+            	return
+                    
             if not target_chats:
+                await send_debug_log("⚠️ Нет активных каналов постинга.")
                 return
+                
+          
+            	
 
             source_title = get_channel_title(
                 source_chat_id,
