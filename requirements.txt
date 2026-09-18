@@ -5,3 +5,4 @@ aiosqlite>=0.20.0
 cryptography>=42.0.0
 python-dotenv>=1.0.1
 apscheduler>=3.10.4
+requests>=2.31.0
