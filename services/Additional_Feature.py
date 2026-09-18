@@ -808,12 +808,11 @@ async def start_forwarder_for_session(
 
     client_instances[task_key] = app
 
-    # Регистрируем наш декомпозированный обработчик
-    app.add_handler(
-        MessageHandler(
-            lambda cli, msg: handle_incoming_message(cli, msg, user_id, session_name)
-        )
-    )
+    # ВАЖНО: регистрируем асинхронный хэндлер
+    async def on_message_wrapper(cli: Client, msg: Message):
+        await handle_incoming_message(cli, msg, user_id, session_name)
+
+    app.add_handler(MessageHandler(on_message_wrapper))
 
     try:
         await app.start()
