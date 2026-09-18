@@ -41,6 +41,41 @@ def set_bot_instance(bot):
     """Устанавливает экземпляр Aiogram-бота для отправки логов."""
     global bot_instance
     bot_instance = bot
+    
+    
+async def keep_channels_alive(client: Client, user_id: int, session_name: str):
+    """
+    Фоновая задача: каждые 45 секунд опрашивает каналы экспорта.
+    Это заставляет Telegram передавать события из каналов, где аккаунт не админ.
+    """
+    await asyncio.sleep(5) # Ждем полного старта клиента
+    while client.is_connected:
+        try:
+            full_config = loaded_configs.get((user_id, session_name), {})
+            channels_config = full_config.get("channels", {})
+            export_channels = get_export_channels(channels_config)
+
+            for chat_id in export_channels.keys():
+                try:
+                    # Запрашиваем последнее сообщение чата. 
+                    # Это заставляет MTProto обновить PTS канала и включить подписку на апдейты!
+                    async for _ in client.get_chat_history(chat_id, limit=1):
+                        break
+                    await asyncio.sleep(1) # Небольшая пауза между каналами от флуда
+                except Exception as e:
+                    logging.debug(f"Ошибка пинга канала {chat_id}: {e}")
+
+            # Опрашиваем раз в 45 секунд
+            await asyncio.sleep(45)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logging.error(f"Ошибка в цикле keep_channels_alive: {e}")
+            await asyncio.sleep(30)
+            
+                
+                        
 
 async def send_debug_log(text: str) -> None:
     """
@@ -543,6 +578,198 @@ async def forward_album_delayed(
                 session_configs,
             )
 
+async def keep_channels_alive(client: Client, user_id: int, session_name: str):
+    """Фоновый пинг каналов-источников, чтобы Telegram не отправлял их в спящий режим."""
+    await asyncio.sleep(5)
+    while client.is_connected:
+        try:
+            full_config = loaded_configs.get((user_id, session_name), {})
+            export_channels = get_export_channels(full_config.get("channels", {}))
+
+            for chat_id in export_channels.keys():
+                try:
+                    async for _ in client.get_chat_history(chat_id, limit=1):
+                        break
+                    await asyncio.sleep(1)
+                except Exception:
+                    pass
+
+            await asyncio.sleep(45)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logging.error(f"Ошибка в цикле keep_channels_alive: {e}")
+            await asyncio.sleep(30)
+
+
+async def warmup_and_activate_channels(client: Client, channels_config: dict, session_name: str):
+    """Инициализирует кэш пиров и подтягивает PTS каждого канала экспорта."""
+    logging.info("Pyrogram-клиент запущен: %s. Подгружаем диалоги...", session_name)
+    async for _ in client.get_dialogs():
+        pass
+
+    export_channels = get_export_channels(channels_config)
+    for ch_id in export_channels.keys():
+        try:
+            await client.get_chat(ch_id)
+            async for _ in client.get_chat_history(ch_id, limit=1):
+                break
+            logging.info("Канал-экспорта %s успешно активирован в MTProto!", ch_id)
+        except Exception as ex:
+            logging.warning("Не удалось активировать канал %s: %s", ch_id, ex)
+
+    logging.info("Кэш пиров каналов для сессии '%s' полностью сформирован!", session_name)
+
+
+async def forward_single_message(
+    client: Client,
+    message: Message,
+    target_chat_id: int,
+    transform_config: dict,
+    user_id: int,
+    source_chat_id: int,
+    source_title: str,
+    src_link: str,
+    full_config: dict,
+):
+    """Отправляет одиночное сообщение (текст или медиа) в один целевой канал постинга."""
+    channels_config = full_config.get("channels", {})
+    target_title = get_channel_title(target_chat_id, channels_config)
+
+    try:
+        orig_html, is_media = get_message_html(message)
+        new_text = transform_text(orig_html, transform_config, is_media=is_media)
+        sent_msg = None
+
+        if not is_transform_needed(transform_config):
+            sent_msg = await message.copy(chat_id=target_chat_id)
+        elif not is_media:
+            sent_msg = await client.send_message(
+                chat_id=target_chat_id,
+                text=new_text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False,
+            )
+        else:
+            sent_msg = await message.copy(
+                chat_id=target_chat_id,
+                caption=new_text,
+                parse_mode=ParseMode.HTML,
+            )
+
+        if sent_msg and hasattr(sent_msg, "id"):
+            dest_link = make_message_link(target_chat_id, sent_msg.id)
+            dest_str = f"<b>{target_title}</b> [<code>{target_chat_id}</code>] (<a href='{dest_link}'>#{sent_msg.id}</a>)"
+        else:
+            dest_str = f"<b>{target_title}</b> [<code>{target_chat_id}</code>]"
+
+        log_msg = (
+            f"✅ <b>Сообщение переслано</b>\n"
+            f"📤 <b>Из:</b> <b>{source_title}</b> [<code>{source_chat_id}</code>] (<a href='{src_link}'>#{message.id}</a>)\n"
+            f"📥 <b>В:</b> {dest_str}"
+        )
+        await send_user_log(user_id, "success", log_msg, full_config)
+
+    except Exception as error:
+        logging.exception("Ошибка отправки сообщения %s в %s", message.id, target_chat_id)
+        await send_user_log(
+            user_id,
+            "error",
+            (
+                f"❌ <b>Ошибка отправки</b>\n"
+                f"📤 <b>Из:</b> <b>{source_title}</b> [<code>{source_chat_id}</code>] (<a href='{src_link}'>#{message.id}</a>)\n"
+                f"📥 <b>В:</b> <b>{target_title}</b> [<code>{target_chat_id}</code>]\n"
+                f"⚠️ <b>Ошибка:</b> <code>{escape(str(error))}</code>"
+            ),
+            full_config,
+        )
+
+
+async def handle_incoming_message(client: Client, message: Message, user_id: int, session_name: str):
+    """Основной обработчик события входящего сообщения: фильтрация и маршрутизация."""
+    full_config = copy.deepcopy(loaded_configs.get((user_id, session_name), {}))
+
+    try:
+        channels_config = full_config.get("channels", {})
+        export_channels = get_export_channels(channels_config)
+        target_chats = get_post_channels(channels_config)
+
+        if not message.chat:
+            return
+
+        source_chat_id = int(message.chat.id)
+        export_mode = export_channels.get(source_chat_id)
+
+        # Сообщение пришло из канала, которого нет в экспорте
+        if export_mode is None or not target_chats:
+            return
+
+        source_title = get_channel_title(
+            source_chat_id,
+            channels_config,
+            fallback_title=getattr(message.chat, "title", None),
+        )
+        src_link = make_message_link(
+            source_chat_id,
+            message.id,
+            getattr(message.chat, "username", None),
+        )
+
+        # Проверка фильтров контента
+        export_filters = export_mode.get("filters", {})
+        if not is_message_allowed(message, export_filters):
+            logging.info("Сообщение %s из чата %s отфильтровано", message.id, source_chat_id)
+            log_msg = (
+                f"ℹ️ <b>Сообщение отфильтровано</b>\n"
+                f"📤 <b>Канал:</b> <b>{source_title}</b> [<code>{source_chat_id}</code>]\n"
+                f"🔗 <b>Пост:</b> <a href='{src_link}'>#{message.id}</a>"
+            )
+            await send_user_log(user_id, "filtered", log_msg, full_config)
+            return
+
+        transform_config = export_mode.get("text_transform", full_config.get("text_transform", {}))
+
+        # Обработка альбомов
+        if message.media_group_id:
+            buffer_key = f"{source_chat_id}:{message.media_group_id}"
+            if buffer_key not in media_group_buffers:
+                task = asyncio.create_task(
+                    forward_album_delayed(buffer_key, client, user_id, full_config)
+                )
+                media_group_buffers[buffer_key] = {
+                    "messages": [message],
+                    "task": task,
+                    "target_chats": target_chats.copy(),
+                    "transform_config": transform_config,
+                    "source_chat": source_chat_id,
+                }
+            else:
+                media_group_buffers[buffer_key]["messages"].append(message)
+            return
+
+        # Пересылка одиночного сообщения по всем целевым каналам постинга
+        for target_chat_id in target_chats:
+            await forward_single_message(
+                client=client,
+                message=message,
+                target_chat_id=target_chat_id,
+                transform_config=transform_config,
+                user_id=user_id,
+                source_chat_id=source_chat_id,
+                source_title=source_title,
+                src_link=src_link,
+                full_config=full_config,
+            )
+
+    except Exception as error:
+        logging.exception("Критическая ошибка обработки сообщения")
+        await send_user_log(
+            user_id,
+            "error",
+            f"❌ <b>Критическая ошибка обработки</b>\nОшибка: <code>{escape(str(error))}</code>",
+            full_config,
+        )
+
 
 async def start_forwarder_for_session(
     user_id: int,
@@ -550,7 +777,7 @@ async def start_forwarder_for_session(
     api_id: int,
     api_hash: str,
 ):
-    """Главная функция обработки сообщений одной юзербот-сессии."""
+    """Инициализация, запуск и поддержание жизненного цикла клиента Pyrogram."""
     session_string = await Database.get_session_string(user_id, session_name)
     if not session_string:
         logging.error("Строка сессии не найдена: %s", session_name)
@@ -570,7 +797,7 @@ async def start_forwarder_for_session(
 
     task_key = (user_id, session_name)
 
-    # Не допускаем работу двух одинаковых клиентов в памяти
+    # Безопасная остановка старого инстанса, если был
     old_client = client_instances.get(task_key)
     if old_client is not None:
         try:
@@ -581,197 +808,30 @@ async def start_forwarder_for_session(
 
     client_instances[task_key] = app
 
-    async def message_handler(client: Client, message: Message):
-        full_config = copy.deepcopy(
-        loaded_configs.get(
-        (user_id, session_name),
+    # Регистрируем наш декомпозированный обработчик
+    app.add_handler(
+        MessageHandler(
+            lambda cli, msg: handle_incoming_message(cli, msg, user_id, session_name)
         )
-         )
-
-        try:
-            channels_config = full_config.get("channels", {})
-            export_channels = get_export_channels(channels_config)
-            target_chats = get_post_channels(channels_config)
-
-            if not message.chat:
-                return
-
-            source_chat_id = int(message.chat.id)
-            source_title = getattr(
-            message.chat,
-            "title",
-            "Без названия",
-            )
-            await send_debug_log(
-            (
-                "📡 <b>Получено новое сообщение</b>\n"
-                f"Канал: <b>{escape(str(source_title))}</b>\n"
-                f"ID канала: <code>{source_chat_id}</code>\n"
-                f"ID сообщения: <code>{message.id}</code>\n"
-                f"Тип: <code>{escape(str(message.media or 'text'))}</code>\n"
-                f"Видео: <code>{bool(message.video)}</code>\n"
-                f"Группа: <code>{escape(str(message.media_group_id or '-'))}</code>"
-            )
-            )
-            logging.info(
-            "Активные export-каналы: %s",
-            list(export_channels.keys()),
-             )
-            export_mode = export_channels.get(source_chat_id)
-            
-            if export_mode is None:
-            	await send_debug_log(
-            	(
-                    "⚠️ <b>Сообщение получено, но канал не выбран для экспорта</b>\n"
-                    f"Канал: <b>{escape(str(source_title))}</b>\n"
-                    f"ID канала: <code>{source_chat_id}</code>\n"
-                    "Проверьте ID в session_configs_json."
-            	)
-            	)
-            	return
-                    
-            if not target_chats:
-                await send_debug_log("⚠️ Нет активных каналов постинга.")
-                return
-                
-          
-            	
-
-            source_title = get_channel_title(
-                source_chat_id,
-                channels_config,
-                fallback_title=getattr(message.chat, "title", None)
-            )
-            src_link = make_message_link(
-                source_chat_id,
-                message.id,
-                getattr(message.chat, "username", None)
-            )
-
-            export_filters = export_mode.get("filters", {})
-            if not is_message_allowed(message, export_filters):
-                logging.info("Сообщение %s из чата %s отфильтровано", message.id, source_chat_id)
-                log_msg = (
-                    f"ℹ️ <b>Сообщение отфильтровано</b>\n"
-                    f"📤 <b>Канал:</b> <b>{source_title}</b> [<code>{source_chat_id}</code>]\n"
-                    f"🔗 <b>Пост:</b> <a href='{src_link}'>#{message.id}</a>"
-                )
-                await send_user_log(user_id, "filtered", log_msg, full_config)
-                return
-
-            transform_config = export_mode.get(
-                "text_transform",
-                full_config.get("text_transform", {}),
-            )
-
-            # Обработка альбомов
-            if message.media_group_id:
-                buffer_key = f"{source_chat_id}:{message.media_group_id}"
-                if buffer_key not in media_group_buffers:
-                    task = asyncio.create_task(
-                        forward_album_delayed(
-                            buffer_key,
-                            client,
-                            user_id,
-                            full_config,
-                        )
-                    )
-                    media_group_buffers[buffer_key] = {
-                        "messages": [message],
-                        "task": task,
-                        "target_chats": target_chats.copy(),
-                        "transform_config": transform_config,
-                        "source_chat": source_chat_id,
-                    }
-                else:
-                    media_group_buffers[buffer_key]["messages"].append(message)
-                return
-
-            original_html, is_media = get_message_html(message)
-            new_text = transform_text(
-                original_html,
-                transform_config,
-                is_media=is_media,
-            )
-
-            for target_chat_id in target_chats:
-                target_title = get_channel_title(target_chat_id, channels_config)
-                try:
-                    sent_msg = None
-                    if not is_transform_needed(transform_config):
-                        sent_msg = await message.copy(chat_id=target_chat_id)
-                    elif not is_media:
-                        sent_msg = await client.send_message(
-                            chat_id=target_chat_id,
-                            text=new_text,
-                            parse_mode=ParseMode.HTML,
-                            disable_web_page_preview=False,
-                        )
-                    else:
-                        sent_msg = await message.copy(
-                            chat_id=target_chat_id,
-                            caption=new_text,
-                            parse_mode=ParseMode.HTML,
-                        )
-
-                    # Ссылка на отправленное сообщение в канале постинга
-                    if sent_msg and hasattr(sent_msg, "id"):
-                        dest_link = make_message_link(target_chat_id, sent_msg.id)
-                        dest_str = f"<b>{target_title}</b> [<code>{target_chat_id}</code>] (<a href='{dest_link}'>#{sent_msg.id}</a>)"
-                    else:
-                        dest_str = f"<b>{target_title}</b> [<code>{target_chat_id}</code>]"
-
-                    log_msg = (
-                        f"✅ <b>Сообщение переслано</b>\n"
-                        f"📤 <b>Из:</b> <b>{source_title}</b> [<code>{source_chat_id}</code>] (<a href='{src_link}'>#{message.id}</a>)\n"
-                        f"📥 <b>В:</b> {dest_str}"
-                    )
-                    await send_user_log(user_id, "success", log_msg, full_config)
-
-                except Exception as error:
-                    logging.exception(
-                        "Ошибка отправки сообщения %s в %s",
-                        message.id,
-                        target_chat_id,
-                    )
-                    await send_user_log(
-                        user_id,
-                        "error",
-                        (
-                            f"❌ <b>Ошибка отправки</b>\n"
-                            f"📤 <b>Из:</b> <b>{source_title}</b> [<code>{source_chat_id}</code>] (<a href='{src_link}'>#{message.id}</a>)\n"
-                            f"📥 <b>В:</b> <b>{target_title}</b> [<code>{target_chat_id}</code>]\n"
-                            f"⚠️ <b>Ошибка:</b> <code>{escape(str(error))}</code>"
-                        ),
-                        full_config,
-                    )
-
-        except Exception as error:
-            logging.exception("Критическая ошибка обработки сообщения")
-            await send_user_log(
-                user_id,
-                "error",
-                f"❌ <b>Критическая ошибка обработки</b>\nОшибка: <code>{escape(str(error))}</code>",
-                full_config,
-            )
-
-    app.add_handler(MessageHandler(message_handler))
+    )
 
     try:
         await app.start()
 
-        logging.info("Pyrogram-клиент запущен: %s. Подгружаем все диалоги и каналы...", session_name)
+        # 1. Прогрев и открытие каналов
+        await warmup_and_activate_channels(app, session_config.get("channels", {}), session_name)
 
-        # Решение проблемы: форсированный обход диалогов для заполнения access_hash сторонних каналов
-        async for dialog in app.get_dialogs():
-            if dialog.chat and dialog.chat.id:
-                try:
-                    await client_instances[task_key].get_chat(dialog.chat.id)
-                except Exception:
-                    pass
+        # 2. Запуск фоновой поддержки соединения с каналами (Heartbeat)
+        keep_alive_task = asyncio.create_task(
+            keep_channels_alive(app, user_id, session_name),
+            name=f"keepalive:{user_id}:{session_name}",
+        )
 
-        logging.info("Кэш пиров каналов для сессии '%s' полностью сформирован!", session_name)
-        await asyncio.Event().wait()
+        try:
+            # Ожидание событий (слушаем апдейты вечно)
+            await asyncio.Event().wait()
+        finally:
+            keep_alive_task.cancel()
 
     except asyncio.CancelledError:
         logging.info("Pyrogram-клиент остановлен: %s", session_name)
