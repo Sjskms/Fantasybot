@@ -33,6 +33,21 @@ processing_messages: set[tuple[int, int]] = set()
 message_claim_lock = asyncio.Lock()
 last_known_msg_ids: dict[int, int] = {}
 
+bot_instance = None
+
+
+def set_bot_instance(bot):
+    """Устанавливает экземпляр Aiogram-бота для отправки логов."""
+    global bot_instance
+    bot_instance = bot
+    
+    # Также пробрасываем бота в глобальный сервис логирования
+    try:
+        from services.logging_service import set_logging_bot_instance
+        set_logging_bot_instance(bot)
+    except Exception:
+        pass
+
 
 def set_running_config(user_id: int, session_name: str, config: dict):
     """Фиксирует точный снимок конфигурации, на которой запущен юзербот."""
@@ -49,6 +64,38 @@ def has_session_unapplied_changes(
     if running is None:
         return False
     return running != (current_db_config or {})
+
+
+async def send_user_log(
+    user_id: int,
+    log_type: str,
+    message_text: str,
+    session_configs: dict,
+):
+    """Отправляет персональное сообщение-лог пользователю в личный чат с ботом."""
+    if not bot_instance:
+        return
+
+    logging_config = session_configs.get("logging", {})
+    if not logging_config.get("enabled", True):
+        return
+
+    if log_type == "success" and not logging_config.get("log_success", True):
+        return
+    if log_type == "filtered" and not logging_config.get("log_filtered", False):
+        return
+    if log_type == "error" and not logging_config.get("log_errors", True):
+        return
+
+    try:
+        await bot_instance.send_message(
+            chat_id=user_id,
+            text=message_text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        logging.exception("Не удалось отправить лог пользователю %s", user_id)
 
 
 async def claim_message(chat_id: int, message_id: int) -> bool:
@@ -85,6 +132,7 @@ async def stop_forwarder(user_id: int, session_name: str) -> None:
         if client.is_connected:
             await client.stop()
         
+        # 1. Глобальный лог для админов
         await log_event(
             "forwarding_disabled", 
             f"🔴 <b>Сессия остановлена</b>\nПользователь: <code>{user_id}</code>\nИмя: <code>{session_name}</code>"
@@ -274,14 +322,25 @@ async def forward_album_delayed(buffer_key: str, client: Client, user_id: int, s
                     if sent: sent_msg_id = sent[0].id
 
             dest_link = make_message_link(target_chat_id, sent_msg_id) if sent_msg_id else ""
-            await log_event(
-                "forward_success",
+            log_msg = (
                 f"✅ <b>Альбом переслан</b> ({len(messages)} медиа)\n"
                 f"📤 Из: <b>{source_title}</b> (<a href='{src_link}'>#{messages[0].id}</a>)\n"
                 f"📥 В: <b>{target_title}</b> (<a href='{dest_link}'>#{sent_msg_id}</a>)"
             )
+            # 1. Глобальный лог для админов
+            await log_event("forward_success", log_msg)
+            # 2. Персональный лог для пользователя
+            await send_user_log(user_id, "success", log_msg, session_configs)
+
         except Exception as error:
-            await log_event("forward_error", f"❌ Ошибка альбома из {source_title} в {target_title}: {error}")
+            err_msg = (
+                f"❌ <b>Ошибка отправки альбома</b>\n"
+                f"📤 Из: <b>{source_title}</b> [<code>{source_chat}</code>]\n"
+                f"📥 В: <b>{target_title}</b> [<code>{target_chat_id}</code>]\n"
+                f"⚠️ Ошибка: <code>{escape(str(error))}</code>"
+            )
+            await log_event("forward_error", err_msg)
+            await send_user_log(user_id, "error", err_msg, session_configs)
 
 
 async def forward_single_message(client: Client, message: Message, target_chat_id: int, transform_config: dict, user_id: int, source_chat_id: int, source_title: str, src_link: str, full_config: dict):
@@ -301,14 +360,25 @@ async def forward_single_message(client: Client, message: Message, target_chat_i
             sent_msg = await message.copy(target_chat_id, caption=new_text, parse_mode=ParseMode.HTML)
 
         dest_link = make_message_link(target_chat_id, sent_msg.id) if sent_msg else ""
-        await log_event(
-            "forward_success",
+        log_msg = (
             f"✅ <b>Сообщение переслано</b>\n"
             f"📤 Из: <b>{source_title}</b> (<a href='{src_link}'>#{message.id}</a>)\n"
             f"📥 В: <b>{target_title}</b> (<a href='{dest_link}'>#{sent_msg.id}</a>)"
         )
+        # 1. Глобальный лог
+        await log_event("forward_success", log_msg)
+        # 2. Лог пользователю
+        await send_user_log(user_id, "success", log_msg, full_config)
+
     except Exception as error:
-        await log_event("forward_error", f"❌ Ошибка из {source_title} в {target_title}: {error}")
+        err_msg = (
+            f"❌ <b>Ошибка отправки</b>\n"
+            f"📤 Из: <b>{source_title}</b> [<code>{source_chat_id}</code>] (<a href='{src_link}'>#{message.id}</a>)\n"
+            f"📥 В: <b>{target_title}</b> [<code>{target_chat_id}</code>]\n"
+            f"⚠️ Ошибка: <code>{escape(str(error))}</code>"
+        )
+        await log_event("forward_error", err_msg)
+        await send_user_log(user_id, "error", err_msg, full_config)
 
 
 async def handle_incoming_message(client: Client, message: Message, user_id: int, session_name: str):
@@ -330,7 +400,9 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
         src_link = make_message_link(source_chat_id, message.id, getattr(message.chat, "username", None))
 
         if not is_message_allowed(message, export_mode.get("filters", {})):
-            await log_event("forward_filtered", f"ℹ️ <b>Отфильтровано</b>\nИсточник: <b>{source_title}</b>\nПост: <a href='{src_link}'>#{message.id}</a>")
+            log_msg = f"ℹ️ <b>Отфильтровано</b>\nИсточник: <b>{source_title}</b>\nПост: <a href='{src_link}'>#{message.id}</a>"
+            await log_event("forward_filtered", log_msg)
+            await send_user_log(user_id, "filtered", log_msg, full_config)
             return
 
         transform_config = export_mode.get("text_transform", full_config.get("text_transform", {}))
@@ -348,7 +420,9 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
             await forward_single_message(client, message, target_chat_id, transform_config, user_id, source_chat_id, source_title, src_link, full_config)
 
     except Exception as error:
-        await log_event("bot_error", f"❌ Критическая ошибка в handle_incoming_message: {error}")
+        err_msg = f"❌ Критическая ошибка в handle_incoming_message: {error}"
+        await log_event("bot_error", err_msg)
+        await send_user_log(user_id, "error", err_msg, full_config)
     finally:
         await finish_message(source_chat_id, message.id)
 
@@ -389,7 +463,10 @@ async def start_forwarder_for_session(user_id: int, session_name: str, api_id: i
 
     try:
         await app.start()
-        await log_event("forwarding_enabled", f"🟢 <b>Сессия запущена</b>\nПользователь: <code>{user_id}</code>\nИмя: <code>{session_name}</code>")
+        
+        start_msg = f"🟢 <b>Сессия запущена</b>\nПользователь: <code>{user_id}</code>\nИмя: <code>{session_name}</code>"
+        await log_event("forwarding_enabled", start_msg)
+        await send_user_log(user_id, "success", start_msg, session_config)
         
         async for _ in app.get_dialogs(): pass
 
