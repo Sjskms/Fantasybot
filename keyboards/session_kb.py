@@ -283,24 +283,22 @@ async def _build_channels_keyboard(
     
 
 def get_logging_settings_keyboard(session_name: str, log_config: dict) -> InlineKeyboardMarkup:
-    """
-    Генерирует клавиатуру с тумблерами для параметров логирования.
-    """
-    is_enabled = log_config.get("enabled", True)
-    log_success = log_config.get("log_success", True)
-    log_filtered = log_config.get("log_filtered", False)
-    log_errors = log_config.get("log_errors", True)
+    # Иконки тумблеров
+    main_icon = "✅ Включены" if log_config.get("enabled", True) else "❌ Выключены"
+    success_icon = "✅" if log_config.get("log_success", True) else "❌"
+    filtered_icon = "✅" if log_config.get("log_filtered", False) else "❌"
+    errors_icon = "✅" if log_config.get("log_errors", True) else "❌"
 
-    main_icon = "✅" if is_enabled else "❌"
-    success_icon = "✅" if log_success else "❌"
-    filtered_icon = "✅" if log_filtered else "❌"
-    errors_icon = "✅" if log_errors else "❌"
+    # Куда слать
+    chat_id = log_config.get("log_chat_id")
+    chat_display = f"ID: {chat_id}" if chat_id else "ЛС бота"
 
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{main_icon} Логирование: {'ВКЛ' if is_enabled else 'ВЫКЛ'}", callback_data=f"toggle_log_{session_name}_main")],
-        [InlineKeyboardButton(text=f"{success_icon} Успешные пересылки", callback_data=f"toggle_log_{session_name}_success")],
-        [InlineKeyboardButton(text=f"{filtered_icon} Отфильтрованные посты", callback_data=f"toggle_log_{session_name}_filtered")],
-        [InlineKeyboardButton(text=f"{errors_icon} Ошибки пересылки", callback_data=f"toggle_log_{session_name}_errors")],
-        [InlineKeyboardButton(text="⬅️ Назад к сессии", callback_data=f"select_session_{session_name}")]
-    ])
-    
+    keyboard = [
+        [InlineKeyboardButton(text=f"Логи сессии: {main_icon}", callback_data=f"toggle_log_{session_name}_main")],
+        [InlineKeyboardButton(text=f"Успешная перессылка: {success_icon}", callback_data=f"toggle_log_{session_name}_success")],
+        [InlineKeyboardButton(text=f"Отфильтровано: {filtered_icon}", callback_data=f"toggle_log_{session_name}_filtered")],
+        [InlineKeyboardButton(text=f"Ошибки отправки: {errors_icon}", callback_data=f"toggle_log_{session_name}_errors")],
+        [InlineKeyboardButton(text=f"🎯 Получатель: {chat_display}", callback_data=f"toggle_log_{session_name}_chatprompt")],
+        [InlineKeyboardButton(text="◀️ Назад к сессии", callback_data=f"manage_session_{session_name}")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
