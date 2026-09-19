@@ -117,20 +117,9 @@ class Database:
                     Enable_posting BOOLEAN DEFAULT FALSE, -- Постинг
                     UNIQUE(user_id, session_name), -- Пользователь не может иметь две сессии с одним именем
                     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-                )
-            ''')
+                )''')
             
-            await db.execute('''CREATE TABLE IF NOT EXISTS settings 
-                                (key TEXT PRIMARY KEY, value TEXT)''')
-
-            # Таблица для хранения контента
-            await db.execute('''CREATE TABLE IF NOT EXISTS posts 
-                                (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                                 original_id INTEGER, 
-                                 source_chat_id INTEGER, 
-                                 status TEXT, 
-                                 file_data TEXT, 
-                                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            
 
             # Таблица для администраторов
             await db.execute('''CREATE TABLE IF NOT EXISTS admins (
@@ -143,52 +132,51 @@ class Database:
                                 user_id INTEGER PRIMARY KEY UNIQUE,
                                 name TEXT,
                                 username TEXT,
-                                registration_date TEXT, -- Храним дату как текст в формате ISO 8601
-                                session TEXT DEFAULT NULL
+                                registration_date TEXT -- Храним дату как текст в формате ISO 8601
                             )''')
                             
-                            
-            # НОВАЯ ТАБЛИЦА: sessions
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_name TEXT NOT NULL,
-                    chan_type TEXT,
-                    channel_id TEXT,
-                    chat_title TEXT
-                )
-            """)
-            
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS session_channels (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_name TEXT NOT NULL,
-                    chan_type TEXT NOT NULL, -- 'export' или 'import'
-                    channel_id INTEGER NOT NULL,
-                    chat_title TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE (session_name, chan_type), -- Одна сессия может иметь только один экспортный и один импортный канал
-                    FOREIGN KEY (session_name) REFERENCES sessions (session_name) ON DELETE CASCADE
-                )
-            ''')
-            
-            await db.execute('''
-                    CREATE TABLE IF NOT EXISTS session_settings (
-                        session_name TEXT PRIMARY KEY,
-                        auto_forward INTEGER DEFAULT 0,
-                        forward_filter TEXT,
-                        custom_header TEXT,
-                        replace_words TEXT,
-                        send_original_link INTEGER DEFAULT 0,
-                        delete_original_after_forward INTEGER DEFAULT 0,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (session_name) REFERENCES sessions (session_name) ON DELETE CASCADE
-                    )
-                ''')
+     
             
             await db.commit()
     
     
+    
+    #для админ статы
+    @staticmethod
+    async def get_users_registered_today() -> int:
+    	async with aiosqlite.connect(Database.DB_NAME) as db:
+    		async with db.execute(
+      		"SELECT COUNT(*) FROM users WHERE date(registration_date) = date('now')"
+    		) as cursor:
+    			row = await cursor.fetchone()
+    			return row[0] if row else 0
+    			
+    			
+    @staticmethod
+    async def get_users_registered_this_week() -> int:
+    	async with aiosqlite.connect(Database.DB_NAME) as db:
+    		async with db.execute(
+    		"SELECT COUNT(*) FROM users WHERE registration_date >= datetime('now', '-7 days')"
+    		) as cursor:
+    			row = await cursor.fetchone()
+    			return row[0] if row else 0
+    
+    
+    @staticmethod
+    async def get_users_registered_this_month() -> int:
+    	async with aiosqlite.connect(Database.DB_NAME) as db:
+    		async with db.execute(
+    		"SELECT COUNT(*) FROM users WHERE registration_date >= datetime('now', '-30 days')"
+    		) as cursor:
+    			row = await cursor.fetchone()
+    			return row[0] if row else 0
+
+
+
+
+
+
+
     @staticmethod
     async def get_user_session(user_id: int, session_name: str) -> str | None:
         if not Database._fernet:
@@ -235,47 +223,6 @@ class Database:
     
     
     
-    
-
-
-
-    
-    @staticmethod
-    async def update_session_channel(session_name: str, chan_type: str, channel_id: int, chat_title: str):
-        async with aiosqlite.connect(Database.DB_NAME) as db:
-            await db.execute('''
-                INSERT OR REPLACE INTO session_channels (session_name, chan_type, channel_id, chat_title)
-                VALUES (?, ?, ?, ?)
-            ''', (session_name, chan_type, channel_id, chat_title))
-            await db.commit()
-            logger.info(f"Channel {chat_title} updated.")
-    
-    @staticmethod
-    async def get_session_settings(session_name: str) -> dict:
-        async with aiosqlite.connect(Database.DB_NAME) as db:
-            db.row_factory = aiosqlite.Row
-            
-            # 1. Получаем общие настройки сессии (предположим, есть таблица sessions)
-            cursor_settings = await db.execute(
-                "SELECT auto_reply, notify FROM sessions WHERE session_name = ?",
-                (session_name,)
-            )
-            settings_row = await cursor_settings.fetchone()
-            result = dict(settings_row) if settings_row else {'auto_reply': False, 'notify': False}
-
-            # 2. Получаем все каналы для этой сессии
-            cursor_channels = await db.execute(
-                "SELECT chan_type, channel_id FROM session_channels WHERE session_name = ?",
-                (session_name,)
-            )
-            channels = await cursor_channels.fetchall()
-            
-            # 3. Добавляем каналы в общий словарь настроек
-            for row in channels:
-                # Теперь ключ 'post' будет добавлен в словарь
-                result[row['chan_type']] = row['channel_id']
-                
-            return result
             
     @classmethod
     def get_session_settings(cls, session_name: str): 
@@ -349,20 +296,6 @@ class Database:
             
         
 
-    # --- Методы для настроек ---
-
-    @staticmethod
-    async def get_setting(key: str):
-        async with aiosqlite.connect(Database.DB_NAME) as db:
-            async with db.execute('SELECT value FROM settings WHERE key = ?', (key,)) as cursor:
-                row = await cursor.fetchone()
-                return row[0] if row else None
-
-    @staticmethod
-    async def update_setting(key: str, value: str):
-        async with aiosqlite.connect(Database.DB_NAME) as db:
-            await db.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, value))
-            await db.commit()
 
     # --- Методы для администраторов ---
 
@@ -413,7 +346,7 @@ class Database:
     async def get_user(user_id: int):
         """Получает данные пользователя по его ID."""
         async with aiosqlite.connect(Database.DB_NAME) as db:
-            async with db.execute('SELECT user_id, name, username, registration_date, session FROM users WHERE user_id = ?', (user_id,)) as cursor:
+            async with db.execute('SELECT user_id, name, username, registration_date FROM users WHERE user_id = ?', (user_id,)) as cursor:
                 return await cursor.fetchone() # Возвращает кортеж или None
 
     @staticmethod
