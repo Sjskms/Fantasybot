@@ -4,9 +4,6 @@ import logging
 import re
 from html import escape
 import aiosqlite
-from html import escape
-
-import requests
 
 from pyrogram import Client
 from pyrogram.enums import ParseMode
@@ -19,13 +16,8 @@ from pyrogram.types import (
     InputMediaDocument,
 )
 
+from config import API_ID, API_HASH
 from database import Database
-
-import config
-
-API_ID = config.API_ID
-API_HASH = config.API_HASH
-ADMIN_ID = getattr(config, "ADMIN_ID", [])
 
 # --- ГЛОБАЛЬНЫЕ РЕЕСТРЫ СОСТОЯНИЯ ---
 active_forwarder_tasks: dict[tuple[int, str], asyncio.Task] = {}
@@ -33,8 +25,11 @@ loaded_configs: dict[tuple[int, str], dict] = {}
 running_configs: dict[tuple[int, str], dict] = {}
 media_group_buffers: dict[str, dict] = {}
 client_instances: dict[tuple[int, str], Client] = {}
-# Защита от повторной пересылки одних и тех же постов
+
+# Защита от дублей при параллельной работе MessageHandler и поллера
 processed_messages: set[tuple[int, int]] = set()
+processing_messages: set[tuple[int, int]] = set()
+message_claim_lock = asyncio.Lock()
 last_known_msg_ids: dict[int, int] = {}
 
 bot_instance = None
@@ -44,106 +39,8 @@ def set_bot_instance(bot):
     """Устанавливает экземпляр Aiogram-бота для отправки логов."""
     global bot_instance
     bot_instance = bot
-    
-    
-async def keep_channels_alive(client: Client, user_id: int, session_name: str):
-    """
-    Фоновый детектор новых постов:
-    Гарантированно забирает новые посты из чужих каналов (даже если канал замьючен и нет пушей).
-    """
-    logging.info("Фоновый поллер каналов для '%s' активирован.", session_name)
-    await asyncio.sleep(3)
 
-    # 1. Запоминаем текущие последние ID постов, чтобы не пересылать старое
-    try:
-        full_cfg = loaded_configs.get((user_id, session_name), {})
-        exp_channels = get_export_channels(full_cfg.get("channels", {}))
-        for ch_id in exp_channels.keys():
-            try:
-                async for msg in client.get_chat_history(ch_id, limit=1):
-                    last_known_msg_ids[ch_id] = msg.id
-                    processed_messages.add((ch_id, msg.id))
-                    break
-            except Exception:
-                pass
-        logging.info("Базовые ID для каналов зафиксированы: %s", last_known_msg_ids)
-    except Exception as e:
-        logging.error("Ошибка первичного опроса каналов: %s", e)
 
-    # 2. Постоянный цикл проверки новых публикаций раз в 12 секунд
-    while client.is_connected:
-        try:
-            await asyncio.sleep(12)
-
-            full_cfg = loaded_configs.get((user_id, session_name), {})
-            exp_channels = get_export_channels(full_cfg.get("channels", {}))
-
-            for ch_id in exp_channels.keys():
-                try:
-                    # Запрашиваем 5 последних постов
-                    new_msgs = []
-                    async for msg in client.get_chat_history(ch_id, limit=5):
-                        last_id = last_known_msg_ids.get(ch_id, 0)
-                        
-                        # Если наткнулись на уже известный старый пост — глубже не идем
-                        if msg.id <= last_id or (ch_id, msg.id) in processed_messages:
-                            break
-                        new_msgs.append(msg)
-
-                    if new_msgs:
-                        # Сортируем от старых к новым, чтобы посты шли по порядку
-                        new_msgs.sort(key=lambda m: m.id)
-                        for m in new_msgs:
-                            processed_messages.add((ch_id, m.id))
-                            last_known_msg_ids[ch_id] = max(last_known_msg_ids.get(ch_id, 0), m.id)
-
-                            logging.info(
-                                "🔥 Обнаружен новый пост #%s в чужом канале %s через фоновый опрос!",
-                                m.id,
-                                ch_id
-                            )
-                            # Передаем в наш обработчик на проверку фильтров и пересылку
-                            asyncio.create_task(
-                                handle_incoming_message(client, m, user_id, session_name)
-                            )
-
-                    await asyncio.sleep(0.5)
-
-                except Exception as ch_err:
-                    logging.debug("Ошибка опроса канала %s: %s", ch_id, ch_err)
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logging.error("Сбой в цикле опроса: %s", e)
-            await asyncio.sleep(10)
-            
-                
-                        
-
-async def send_debug_log(text: str) -> None:
-    """
-    Временный диагностический лог.
-    Отправляет сообщения администраторам независимо от настроек logging.
-    """
-    if not bot_instance:
-        logging.warning("bot_instance еще не установлен")
-        return
-
-    if not ADMIN_ID:
-        logging.warning("ADMIN_ID не настроен")
-        return
-
-    await bot_instance.send_message(
-                chat_id=ADMIN_ID,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-    
-            
-            
-            
 def set_running_config(user_id: int, session_name: str, config: dict):
     """Фиксирует точный снимок конфигурации, на которой запущен юзербот."""
     running_configs[(user_id, session_name)] = copy.deepcopy(config or {})
@@ -159,6 +56,31 @@ def has_session_unapplied_changes(
     if running is None:
         return False
     return running != (current_db_config or {})
+
+
+async def claim_message(chat_id: int, message_id: int) -> bool:
+    """
+    Атомарно захватывает сообщение в обработку.
+    Возвращает True только для первого потока (пуш или поллер).
+    """
+    key = (chat_id, message_id)
+    async with message_claim_lock:
+        if key in processed_messages or key in processing_messages:
+            return False
+        processing_messages.add(key)
+        return True
+
+
+async def finish_message(chat_id: int, message_id: int):
+    """Помечает сообщение как окончательно завершенное."""
+    key = (chat_id, message_id)
+    async with message_claim_lock:
+        processing_messages.discard(key)
+        processed_messages.add(key)
+        if len(processed_messages) > 20000:
+            copy_list = list(processed_messages)
+            processed_messages.clear()
+            processed_messages.update(copy_list[-10000:])
 
 
 async def stop_forwarder(user_id: int, session_name: str) -> None:
@@ -252,14 +174,12 @@ def transform_text(
 
     text = original_html or ""
 
-    # 1. Замена ссылок
     for item in transform_config.get("replace_links", []):
         old_link = item.get("from")
         new_link = item.get("to")
         if old_link:
             text = text.replace(old_link, new_link or "")
 
-    # 2. Замена слов (без учета регистра)
     for item in transform_config.get("replace_words", []):
         old_word = item.get("from")
         new_word = item.get("to")
@@ -271,7 +191,6 @@ def transform_text(
                 flags=re.IGNORECASE,
             )
 
-    # 3. Кастомный текст (добавление / замена)
     mode = transform_config.get("mode", "keep")
     custom_text = transform_config.get("custom_text", "")
 
@@ -286,162 +205,83 @@ def transform_text(
 
 
 def is_message_allowed(message: Message, export_filters: dict) -> bool:
+    """Проверяет соответствие сообщения заданным фильтрам (размер, длительность, тип)."""
     if not isinstance(export_filters, dict):
-        logging.warning(
-            "Фильтры имеют неправильный тип: %s",
-            type(export_filters).__name__,
-        )
         return False
 
     def get_rules(key: str):
         value = export_filters.get(key, {})
-
         if isinstance(value, dict):
-            try:
-                min_value = int(value.get("min", 0))
-                max_value = int(value.get("max", 999999999))
-            except (TypeError, ValueError):
-                min_value = 0
-                max_value = 999999999
-
             return (
                 bool(value.get("enabled", False)),
-                min_value,
-                max_value,
+                int(value.get("min", 0)),
+                int(value.get("max", 999999999)),
             )
-
         if isinstance(value, bool):
             return value, 0, 999999999
-
         return False, 0, 999999999
 
     if message.text and not message.media:
-        enabled, min_value, max_value = get_rules("text")
-        length = len(message.text)
+        enabled, min_val, max_val = get_rules("text")
+        return enabled and min_val <= len(message.text) <= max_val
 
-        logging.info(
-            "Проверка text: enabled=%s, length=%s, range=%s-%s",
-            enabled,
-            length,
-            min_value,
-            max_value,
-        )
-
-        return enabled and min_value <= length <= max_value
-
-    if message.video:
-        enabled, min_value, max_value = get_rules("videos")
-        duration = message.video.duration or 0
-
-        logging.info(
-            "Проверка video: enabled=%s, duration=%s, range=%s-%s",
-            enabled,
-            duration,
-            min_value,
-            max_value,
-        )
-
-        return enabled and min_value <= duration <= max_value
+    # Видео и GIF/Анимации
+    if message.video or message.animation:
+        enabled, min_val, max_val = get_rules("videos")
+        dur = 0
+        if message.video:
+            dur = message.video.duration or 0
+        elif message.animation:
+            dur = message.animation.duration or 0
+        return enabled and min_val <= dur <= max_val
 
     if message.photo:
-        enabled, min_value, max_value = get_rules("photos")
-        file_size = message.photo.file_size or 0
-
-        logging.info(
-            "Проверка photo: enabled=%s, size=%s, range=%s-%s",
-            enabled,
-            file_size,
-            min_value,
-            max_value,
-        )
-
-        return enabled and min_value <= file_size <= max_value
+        enabled, min_val, max_val = get_rules("photos")
+        # Если в старой базе стоял дефолтный лимит 999999 (0.95 МБ), расширяем до 2 ГБ
+        if max_val == 999999:
+            max_val = 2000000000
+        return enabled and min_val <= (message.photo.file_size or 0) <= max_val
 
     if message.video_note:
-        enabled, min_value, max_value = get_rules("video_notes")
-        duration = message.video_note.duration or 0
-
-        return enabled and min_value <= duration <= max_value
+        enabled, min_val, max_val = get_rules("video_notes")
+        return enabled and min_val <= (message.video_note.duration or 0) <= max_val
 
     if message.voice:
-        enabled, min_value, max_value = get_rules("voices")
-        duration = message.voice.duration or 0
-
-        return enabled and min_value <= duration <= max_value
+        enabled, min_val, max_val = get_rules("voices")
+        return enabled and min_val <= (message.voice.duration or 0) <= max_val
 
     if message.audio:
-        enabled, min_value, max_value = get_rules("music")
-        duration = message.audio.duration or 0
-
-        return enabled and min_value <= duration <= max_value
+        enabled, min_val, max_val = get_rules("music")
+        return enabled and min_val <= (message.audio.duration or 0) <= max_val
 
     if message.document:
-        enabled, min_value, max_value = get_rules("documents")
-        file_size = message.document.file_size or 0
+        enabled, min_val, max_val = get_rules("documents")
+        if max_val == 999999:
+            max_val = 2000000000
+        return enabled and min_val <= (message.document.file_size or 0) <= max_val
 
-        return enabled and min_value <= file_size <= max_value
-
-    logging.info(
-        "Сообщение %s имеет неподдерживаемый тип медиа",
-        getattr(message, "id", None),
-    )
     return False
 
 
 def get_export_channels(channels_config: dict) -> dict[int, dict]:
-    """
-    Возвращает все каналы, у которых включен режим export.
-
-    Результат:
-    {
-        -1001234567890: {
-            "enabled": True,
-            "filters": {...}
-        }
-    }
-    """
+    """Извлекает каналы, из которых включен экспорт (источники)."""
     result = {}
-
     if not isinstance(channels_config, dict):
-        logging.error(
-            "Раздел channels имеет неправильный тип: %s",
-            type(channels_config).__name__,
-        )
         return result
 
     for raw_id, channel_data in channels_config.items():
         try:
             chat_id = int(str(raw_id).strip())
         except (TypeError, ValueError):
-            logging.warning(
-                "Некорректный ID канала в session_configs_json: %r",
-                raw_id,
-            )
+            logging.warning("Некорректный ID канала: %r", raw_id)
             continue
 
         if not isinstance(channel_data, dict):
-            logging.warning(
-                "Конфигурация канала %s имеет неправильный тип",
-                chat_id,
-            )
             continue
 
-        modes = channel_data.get("modes", {})
-        if not isinstance(modes, dict):
-            continue
-
-        export_mode = modes.get("export", {})
-        if not isinstance(export_mode, dict):
-            continue
-
-        if export_mode.get("enabled", False):
+        export_mode = channel_data.get("modes", {}).get("export", {})
+        if isinstance(export_mode, dict) and export_mode.get("enabled", False):
             result[chat_id] = export_mode
-
-            logging.info(
-                "Активный источник экспорта: id=%s, title=%s",
-                chat_id,
-                channel_data.get("title", "Без названия"),
-            )
 
     return result
 
@@ -449,10 +289,16 @@ def get_export_channels(channels_config: dict) -> dict[int, dict]:
 def get_post_channels(channels_config: dict) -> list[int]:
     """Извлекает каналы, в которые включен постинг (цели)."""
     result = []
+    if not isinstance(channels_config, dict):
+        return result
+
     for raw_id, channel_data in channels_config.items():
         try:
-            chat_id = int(raw_id)
+            chat_id = int(str(raw_id).strip())
         except (TypeError, ValueError):
+            continue
+
+        if not isinstance(channel_data, dict):
             continue
 
         post_mode = channel_data.get("modes", {}).get("post", {})
@@ -463,7 +309,7 @@ def get_post_channels(channels_config: dict) -> list[int]:
 
 
 def get_channel_title(chat_id: int, channels_config: dict, fallback_title: str = None) -> str:
-    """Возвращает название канала из конфигурации или запасное имя."""
+    """Возвращает экранированное название канала."""
     raw_id = str(chat_id)
     cdata = channels_config.get(raw_id, {})
     title = cdata.get("title") or fallback_title or f"Канал {chat_id}"
@@ -475,14 +321,12 @@ def make_message_link(chat_id: int, message_id: int, username: str = None) -> st
     if username:
         clean_user = username.lstrip("@")
         return f"https://t.me/{clean_user}/{message_id}"
-    
-    # Для приватных каналов/супергрупп (ID начинается с -100)
+
     str_id = str(chat_id)
     if str_id.startswith("-100"):
         internal_id = str_id[4:]
         return f"https://t.me/c/{internal_id}/{message_id}"
-    
-    # Для обычных групп/чатов
+
     clean_id = str_id.lstrip("-")
     return f"https://t.me/c/{clean_id}/{message_id}"
 
@@ -510,16 +354,16 @@ async def forward_album_delayed(
 
     messages.sort(key=lambda item: item.id)
     channels_cfg = session_configs.get("channels", {})
-    
+
     source_title = get_channel_title(
         source_chat,
         channels_cfg,
-        fallback_title=getattr(messages[0].chat, "title", None)
+        fallback_title=getattr(messages[0].chat, "title", None),
     )
     src_link = make_message_link(
         source_chat,
         messages[0].id,
-        getattr(messages[0].chat, "username", None)
+        getattr(messages[0].chat, "username", None),
     )
 
     for target_chat_id in target_chats:
@@ -594,7 +438,6 @@ async def forward_album_delayed(
                     if sent and isinstance(sent, list) and len(sent) > 0:
                         sent_msg_id = sent[0].id
 
-            # Ссылка на отправленное сообщение в канале постинга (если доступен ID)
             if sent_msg_id:
                 dest_link = make_message_link(target_chat_id, sent_msg_id)
                 dest_str = f"<b>{target_title}</b> [<code>{target_chat_id}</code>] (<a href='{dest_link}'>#{sent_msg_id}</a>)"
@@ -621,48 +464,6 @@ async def forward_album_delayed(
                 ),
                 session_configs,
             )
-
-async def keep_channels_alive(client: Client, user_id: int, session_name: str):
-    """Фоновый пинг каналов-источников, чтобы Telegram не отправлял их в спящий режим."""
-    await asyncio.sleep(5)
-    while client.is_connected:
-        try:
-            full_config = loaded_configs.get((user_id, session_name), {})
-            export_channels = get_export_channels(full_config.get("channels", {}))
-
-            for chat_id in export_channels.keys():
-                try:
-                    async for _ in client.get_chat_history(chat_id, limit=1):
-                        break
-                    await asyncio.sleep(1)
-                except Exception:
-                    pass
-
-            await asyncio.sleep(45)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logging.error(f"Ошибка в цикле keep_channels_alive: {e}")
-            await asyncio.sleep(30)
-
-
-async def warmup_and_activate_channels(client: Client, channels_config: dict, session_name: str):
-    """Инициализирует кэш пиров и подтягивает PTS каждого канала экспорта."""
-    logging.info("Pyrogram-клиент запущен: %s. Подгружаем диалоги...", session_name)
-    async for _ in client.get_dialogs():
-        pass
-
-    export_channels = get_export_channels(channels_config)
-    for ch_id in export_channels.keys():
-        try:
-            await client.get_chat(ch_id)
-            async for _ in client.get_chat_history(ch_id, limit=1):
-                break
-            logging.info("Канал-экспорта %s успешно активирован в MTProto!", ch_id)
-        except Exception as ex:
-            logging.warning("Не удалось активировать канал %s: %s", ch_id, ex)
-
-    logging.info("Кэш пиров каналов для сессии '%s' полностью сформирован!", session_name)
 
 
 async def forward_single_message(
@@ -729,27 +530,21 @@ async def forward_single_message(
         )
 
 
-async def handle_incoming_message(client: Client, message: Message, user_id: int, session_name: str):
+async def handle_incoming_message(
+    client: Client,
+    message: Message,
+    user_id: int,
+    session_name: str,
+):
     """Основной обработчик события входящего сообщения: фильтрация и маршрутизация."""
     if not message.chat:
         return
 
     source_chat_id = int(message.chat.id)
-    msg_key = (source_chat_id, message.id)
 
-    # --- ЗАЩИТА ОТ ДУБЛИКАТОВ ---
-    if msg_key in processed_messages:
-        # Сообщение уже обрабатывается или было обработано
+    # Атомарный захват сообщения (защита от дубликатов между update и поллером)
+    if not await claim_message(source_chat_id, message.id):
         return
-    
-    # Добавляем в реестр обработанных
-    processed_messages.add(msg_key)
-
-    # Очистка старых ID, если их стало слишком много (больше 10 000), чтобы не забивать ОЗУ
-    if len(processed_messages) > 10000:
-        processed_messages.clear()
-        processed_messages.add(msg_key) # Сохраняем текущее после очистки
-    # ----------------------------
 
     full_config = copy.deepcopy(loaded_configs.get((user_id, session_name), {}))
 
@@ -775,7 +570,6 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
             getattr(message.chat, "username", None),
         )
 
-        # Проверка фильтров контента
         export_filters = export_mode.get("filters", {})
         if not is_message_allowed(message, export_filters):
             logging.info("Сообщение %s из чата %s отфильтровано", message.id, source_chat_id)
@@ -822,14 +616,105 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
             )
 
     except Exception as error:
-        logging.exception("Критическая ошибка обработки сообщения")
-        # Сообщаем об ошибке, если логи включены
+        logging.exception("Критическая ошибка обработки сообщения %s", message.id)
         await send_user_log(
             user_id,
             "error",
             f"❌ <b>Критическая ошибка обработки</b>\nОшибка: <code>{escape(str(error))}</code>",
             full_config,
         )
+    finally:
+        await finish_message(source_chat_id, message.id)
+
+
+async def keep_channels_alive(
+    client: Client,
+    user_id: int,
+    session_name: str,
+):
+    """
+    Фоновый поллер-детектор новых публикаций.
+    Гарантированно забирает новые сообщения из чужих/заглушенных каналов,
+    даже если Telegram сервер не шлет живые push-события.
+    """
+    logging.info("Поллер каналов запущен для сессии: %s", session_name)
+    await asyncio.sleep(4)
+
+    # 1. Первичная фиксация последних ID постов, чтобы не постить старое
+    cfg = loaded_configs.get((user_id, session_name), {})
+    exp_channels = get_export_channels(cfg.get("channels", {}))
+    for ch_id in exp_channels.keys():
+        try:
+            async for msg in client.get_chat_history(ch_id, limit=1):
+                last_known_msg_ids[ch_id] = msg.id
+                # Добавляем стартовый пост в завершенные, чтобы не пересылать историю
+                await finish_message(ch_id, msg.id)
+                logging.info("Стартовый пост канала %s зафиксирован: ID #%s", ch_id, msg.id)
+                break
+        except Exception:
+            pass
+
+    # 2. Непрерывный цикл опроса
+    while client.is_connected:
+        try:
+            await asyncio.sleep(10)
+
+            cfg = loaded_configs.get((user_id, session_name), {})
+            exp_channels = get_export_channels(cfg.get("channels", {}))
+
+            for ch_id in exp_channels.keys():
+                try:
+                    last_id = last_known_msg_ids.get(ch_id, 0)
+                    new_msgs = []
+
+                    async for msg in client.get_chat_history(ch_id, limit=20):
+                        if msg.id <= last_id:
+                            break
+                        new_msgs.append(msg)
+
+                    if not new_msgs:
+                        continue
+
+                    # Сортируем от старых к новым, чтобы публикация шла по порядку
+                    new_msgs.sort(key=lambda m: m.id)
+
+                    for msg in new_msgs:
+                        last_known_msg_ids[ch_id] = max(last_known_msg_ids.get(ch_id, 0), msg.id)
+                        logging.info("🔥 Поллер обнаружил новый пост #%s в канале %s!", msg.id, ch_id)
+
+                        # Передаем напрямую в обработчик (claim_message внутри защитит от дублей)
+                        asyncio.create_task(
+                            handle_incoming_message(client, msg, user_id, session_name)
+                        )
+
+                except Exception as ch_err:
+                    logging.debug("Ошибка опроса канала %s: %s", ch_id, ch_err)
+
+        except asyncio.CancelledError:
+            logging.info("Поллер каналов остановлен: %s", session_name)
+            break
+        except Exception as e:
+            logging.error("Сбой в цикле поллера: %s", e)
+            await asyncio.sleep(10)
+
+
+async def warmup_and_activate_channels(client: Client, channels_config: dict, session_name: str):
+    """Инициализирует кэш диалогов и подтягивает PTS каналов экспорта."""
+    logging.info("Pyrogram-клиент запущен: %s. Подгружаем диалоги...", session_name)
+    async for _ in client.get_dialogs():
+        pass
+
+    export_channels = get_export_channels(channels_config)
+    for ch_id in export_channels.keys():
+        try:
+            await client.get_chat(ch_id)
+            async for _ in client.get_chat_history(ch_id, limit=1):
+                break
+            logging.info("Канал-экспорта %s успешно активирован в MTProto!", ch_id)
+        except Exception as ex:
+            logging.warning("Не удалось активировать канал %s: %s", ch_id, ex)
+
+    logging.info("Кэш пиров каналов для сессии '%s' полностью сформирован!", session_name)
 
 
 async def start_forwarder_for_session(
@@ -858,7 +743,6 @@ async def start_forwarder_for_session(
 
     task_key = (user_id, session_name)
 
-    # Безопасная остановка старого инстанса, если был
     old_client = client_instances.get(task_key)
     if old_client is not None:
         try:
@@ -869,7 +753,7 @@ async def start_forwarder_for_session(
 
     client_instances[task_key] = app
 
-    # ВАЖНО: регистрируем асинхронный хэндлер
+    # Явный асинхронный хэндлер для живых push-апдейтов
     async def on_message_wrapper(cli: Client, msg: Message):
         await handle_incoming_message(cli, msg, user_id, session_name)
 
@@ -881,17 +765,20 @@ async def start_forwarder_for_session(
         # 1. Прогрев и открытие каналов
         await warmup_and_activate_channels(app, session_config.get("channels", {}), session_name)
 
-        # 2. Запуск фоновой поддержки соединения с каналами (Heartbeat)
+        # 2. Запуск фонового поллера (для чужих/заглушенных каналов)
         keep_alive_task = asyncio.create_task(
             keep_channels_alive(app, user_id, session_name),
             name=f"keepalive:{user_id}:{session_name}",
         )
 
         try:
-            # Ожидание событий (слушаем апдейты вечно)
             await asyncio.Event().wait()
         finally:
             keep_alive_task.cancel()
+            try:
+                await keep_alive_task
+            except asyncio.CancelledError:
+                pass
 
     except asyncio.CancelledError:
         logging.info("Pyrogram-клиент остановлен: %s", session_name)
