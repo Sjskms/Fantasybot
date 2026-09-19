@@ -52,7 +52,13 @@ db = Database()
 
 
 # --- FSM СОСТОЯНИЯ ---
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 
+class UserSessionLoggingStates(StatesGroup):
+    waiting_for_session_log_chat_id = State()
+    
+    
 class TextTransformStates(StatesGroup):
     waiting_for_custom_text = State()
     waiting_for_replace_word = State()
@@ -706,7 +712,7 @@ async def show_logging_settings(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("toggle_log_"))
-async def toggle_log_option_handler(callback: CallbackQuery):
+async def toggle_log_option_handler(callback: CallbackQuery, state: FSMContext):
     raw_data = callback.data.removeprefix("toggle_log_")
     session_name, log_type = raw_data.rsplit("_", 1)
     user_id = callback.from_user.id
@@ -721,11 +727,38 @@ async def toggle_log_option_handler(callback: CallbackQuery):
             "log_success": True,
             "log_filtered": False,
             "log_errors": True,
+            "log_chat_id": None,
         }
 
     log_config = session_configs["logging"]
 
-    if log_type == "main":
+    # --- НОВЫЙ ФУНКЦИОНАЛ: Настройка получателя логов ---
+    if log_type == "chatprompt":
+        await state.update_data(target_session_name=session_name)
+        await state.set_state(UserSessionLoggingStates.waiting_for_session_log_chat_id)
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Сбросить (в ЛС бота)", callback_data=f"toggle_log_{session_name}_reset_chat")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=f"session_logging_{session_name}")]
+        ])
+        
+        await callback.message.edit_text(
+            f"🎯 <b>Настройка получателя логов для сессии:</b> <code>{escape(session_name)}</code>\n\n"
+            "Вы можете пересылать логи работы юзербота в ваш закрытый чат, группу или канал.\n\n"
+            "✍️ Отправьте <b>ID чата/канала</b> (например, <code>-100123456789</code>).\n"
+            "<i>Убедитесь, что ваш бот добавлен в этот чат/канал с правом отправки сообщений!</i>",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
+    elif log_type == "reset_chat":
+        log_config["log_chat_id"] = None
+        status_msg = "Логи перенаправлены в ЛС бота"
+        
+    # --- СТАНДАРТНЫЕ ТУМБЛЕРЫ ---
+    elif log_type == "main":
         log_config["enabled"] = not log_config.get("enabled", True)
         status_msg = "Главный тумблер логов " + ("включен ✅" if log_config["enabled"] else "выключен ❌")
     elif log_type == "success":
@@ -745,14 +778,65 @@ async def toggle_log_option_handler(callback: CallbackQuery):
     await Database.update_session_configs(user_id, session_name, session_configs)
     await update_live_config(user_id, session_name)
 
+    # Возврат к стандартному меню настроек логирования
+    text = (
+        f"📜 <b>Настройки логирования для сессии:</b> <code>{escape(session_name)}</code>\n\n"
+        "Выберите, какие события бот будет отправлять вам в личные сообщения:"
+    )
     keyboard = get_logging_settings_keyboard(session_name, log_config)
     try:
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except TelegramBadRequest:
         pass
 
     await callback.answer(status_msg, show_alert=False)
 
+
+# --- ХЭНДЛЕР ПРИЕМА ID ОТ ПОЛЬЗОВАТЕЛЯ ---
+@router.message(UserSessionLoggingStates.waiting_for_session_log_chat_id)
+async def process_user_session_log_chat_id(message: Message, state: FSMContext):
+    raw_val = (message.text or "").strip()
+    
+    # Проверка, что введен числовой ID (может начинаться с минуса)
+    if not raw_val.lstrip('-').isdigit():
+        return await message.answer(
+            "⚠️ Некорректный ID. Пожалуйста, отправьте числовой ID чата/канала "
+            "(например, <code>-100123456789</code> или <code>123456789</code>)."
+        )
+
+    target_chat_id = int(raw_val)
+    fsm_data = await state.get_data()
+    session_name = fsm_data.get("target_session_name")
+    user_id = message.from_user.id
+
+    await state.clear()
+
+    session_configs = await Database.get_session_configs(user_id, session_name)
+    if not isinstance(session_configs, dict):
+        session_configs = {}
+
+    log_config = session_configs.setdefault("logging", {
+        "enabled": True,
+        "log_success": True,
+        "log_filtered": False,
+        "log_errors": True,
+    })
+    
+    log_config["log_chat_id"] = target_chat_id
+    session_configs["logging"] = log_config
+
+    await Database.update_session_configs(user_id, session_name, session_configs)
+    await update_live_config(user_id, session_name)
+
+    keyboard = get_logging_settings_keyboard(session_name, log_config)
+    await message.answer(
+        f"✅ <b>Получатель логов успешно изменен!</b>\n"
+        f"Логи сессии <code>{escape(session_name)}</code> теперь отправляются на ID: <code>{target_chat_id}</code>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    
+    
 
 # --- ХЭНДЛЕРЫ КАНАЛОВ И ФИЛЬТРОВ ---
 
