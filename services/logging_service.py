@@ -7,14 +7,15 @@ from typing import Any, Dict, Optional
 
 import aiofiles
 from aiogram import Bot
-from pyrogram.enums import ParseMode
 
 from database import Database
 
 logger = logging.getLogger(__name__)
 
-CONFIG_FILE = "bot_logging_config.json"
-LOG_FILE_PATH = "bot_events.log"
+# Чтобы пути в Pydroid3/Android не сбивались при перезапусках, привязываемся к директории проекта
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_FILE = os.path.join(BASE_DIR, "bot_logging_config.json")
+LOG_FILE_PATH = os.path.join(BASE_DIR, "bot_events.log")
 
 DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
     # Главные тумблеры
@@ -212,12 +213,13 @@ async def log_event(event_key: str, message: str, extra_console: str = ""):
     if cfg.get("telegram_logging", True) and _bot_ref:
         target_chat_id = cfg.get("telegram_log_chat_id")
 
+        # ВАЖНО: parse_mode для aiogram должен передаваться СТРОКОЙ "HTML", а не объектом из Pyrogram!
         if target_chat_id:
             try:
                 await _bot_ref.send_message(
                     chat_id=target_chat_id,
                     text=message,
-                    parse_mode=ParseMode.HTML,
+                    parse_mode="HTML",
                     disable_web_page_preview=True,
                 )
             except Exception as e:
@@ -242,7 +244,7 @@ async def log_event(event_key: str, message: str, extra_console: str = ""):
                     await _bot_ref.send_message(
                         chat_id=admin_id,
                         text=message,
-                        parse_mode=ParseMode.HTML,
+                        parse_mode="HTML",
                         disable_web_page_preview=True,
                     )
                 except Exception:
