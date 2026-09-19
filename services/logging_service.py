@@ -3,7 +3,6 @@ import datetime
 import json
 import logging
 import os
-from html import escape
 from typing import Any, Dict, Optional
 
 import aiofiles
@@ -46,9 +45,14 @@ _bot_ref: Optional[Bot] = None
 
 
 def set_logging_bot_instance(bot: Bot):
-    """Привязка экземпляра бота для отправки логов."""
+    """Привязка экземпляра бота для рассылки логов."""
     global _bot_ref
     _bot_ref = bot
+
+
+def get_logging_bot_instance() -> Optional[Bot]:
+    """Возвращает привязанный экземпляр Aiogram Bot."""
+    return _bot_ref
 
 
 async def load_global_logging_config() -> Dict[str, Any]:
@@ -114,10 +118,7 @@ async def append_to_log_file(event_key: str, message: str):
 
 
 async def cleanup_log_file(period: Optional[str] = None):
-    """
-    Очищает файл логов от устаревших записей за указанный период
-    или удаляет файл полностью при выборе 'delete_now'.
-    """
+    """Очищает файл логов от устаревших записей за указанный период."""
     if not os.path.exists(LOG_FILE_PATH):
         return
 
@@ -155,7 +156,7 @@ async def cleanup_log_file(period: Optional[str] = None):
         new_lines = []
         for line in lines:
             if line.startswith("[") and "]" in line:
-                date_part = line[1:19]  # Формат: "YYYY-MM-DD HH:MM:SS"
+                date_part = line[1:19]
                 try:
                     line_dt = datetime.datetime.strptime(date_part, "%Y-%m-%d %H:%M:%S")
                     if line_dt >= cutoff:
@@ -173,15 +174,14 @@ async def cleanup_log_file(period: Optional[str] = None):
 
 async def log_event(event_key: str, message: str, extra_console: str = ""):
     """
-    Центральный метод логирования системы.
+    ГЛОБАЛЬНОЕ логирование системы (для Администратора):
     Сверяет event_key с настройками JSON:
     1. Выводит в консоль (если включено console_logging)
     2. Записывает в текстовый файл (если включено file_logging)
-    3. Отправляет в Telegram по конкретному ID чата/канала или всем админам
+    3. Отправляет в Telegram админам или в указанный админский чат
     """
     cfg = get_cached_logging_config()
 
-    # Главный тумблер логирования бота
     if not cfg.get("bot_logging", True):
         return
 
@@ -206,13 +206,12 @@ async def log_event(event_key: str, message: str, extra_console: str = ""):
     # 2. Логирование в текстовый файл
     if cfg.get("file_logging", True):
         await append_to_log_file(event_key, message)
-        await cleanup_log_file()  # Автоочистка устаревших строк
+        await cleanup_log_file()
 
-    # 3. Логирование в Telegram (ОТПРАВКА В ЧАТ / КАНАЛ / АДМИНАМ)
+    # 3. Логирование в Telegram для Администрации
     if cfg.get("telegram_logging", True) and _bot_ref:
         target_chat_id = cfg.get("telegram_log_chat_id")
 
-        # Если задан конкретный ID чата/канала
         if target_chat_id:
             try:
                 await _bot_ref.send_message(
@@ -222,9 +221,8 @@ async def log_event(event_key: str, message: str, extra_console: str = ""):
                     disable_web_page_preview=True,
                 )
             except Exception as e:
-                logger.error("Ошибка отправки лога в чат/канал %s: %s", target_chat_id, e)
+                logger.error("Ошибка отправки глобального лога в чат %s: %s", target_chat_id, e)
         else:
-            # Если ID чата не задан — отправляем всем администраторам
             admin_ids = []
             try:
                 admin_ids = await Database.get_all_admin_ids()

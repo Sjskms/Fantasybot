@@ -18,7 +18,7 @@ from pyrogram.types import (
 
 from config import API_ID, API_HASH
 from database import Database
-from services.logging_service import log_event
+from services.logging_service import log_event, get_logging_bot_instance, set_logging_bot_instance
 
 # --- ГЛОБАЛЬНЫЕ РЕЕСТРЫ СОСТОЯНИЯ ---
 active_forwarder_tasks: dict[tuple[int, str], asyncio.Task] = {}
@@ -40,13 +40,7 @@ def set_bot_instance(bot):
     """Устанавливает экземпляр Aiogram-бота для отправки логов."""
     global bot_instance
     bot_instance = bot
-    
-    # Также пробрасываем бота в глобальный сервис логирования
-    try:
-        from services.logging_service import set_logging_bot_instance
-        set_logging_bot_instance(bot)
-    except Exception:
-        pass
+    set_logging_bot_instance(bot)
 
 
 def set_running_config(user_id: int, session_name: str, config: dict):
@@ -72,8 +66,16 @@ async def send_user_log(
     message_text: str,
     session_configs: dict,
 ):
-    """Отправляет персональное сообщение-лог пользователю в личный чат с ботом."""
-    if not bot_instance:
+    """
+    Отправляет персональный лог пользователю в Telegram.
+    НЕ ЗАВИСИТ от глобальных настроек логирования админа!
+    
+    Поддерживает:
+    - Логирование в ЛС пользователя с ботом (по умолчанию)
+    - Логирование в выбранный пользователем чат/канал (если указан log_chat_id / chat_id)
+    """
+    bot = bot_instance or get_logging_bot_instance()
+    if not bot:
         return
 
     logging_config = session_configs.get("logging", {})
@@ -87,15 +89,22 @@ async def send_user_log(
     if log_type == "error" and not logging_config.get("log_errors", True):
         return
 
+    # Если пользователь выбрал отдельный чат/канал для логов — слать туда, иначе в ЛС пользователю
+    target_chat_id = (
+        logging_config.get("log_chat_id")
+        or logging_config.get("chat_id")
+        or user_id
+    )
+
     try:
-        await bot_instance.send_message(
-            chat_id=user_id,
+        await bot.send_message(
+            chat_id=target_chat_id,
             text=message_text,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
-    except Exception:
-        logging.exception("Не удалось отправить лог пользователю %s", user_id)
+    except Exception as e:
+        logging.warning("Не удалось отправить лог пользователю %s в чат %s: %s", user_id, target_chat_id, e)
 
 
 async def claim_message(chat_id: int, message_id: int) -> bool:
@@ -327,10 +336,10 @@ async def forward_album_delayed(buffer_key: str, client: Client, user_id: int, s
                 f"📤 Из: <b>{source_title}</b> (<a href='{src_link}'>#{messages[0].id}</a>)\n"
                 f"📥 В: <b>{target_title}</b> (<a href='{dest_link}'>#{sent_msg_id}</a>)"
             )
-            # 1. Глобальный лог для админов
-            await log_event("forward_success", log_msg)
-            # 2. Персональный лог для пользователя
+            # 1. Персональный лог для пользователя (в Telegram)
             await send_user_log(user_id, "success", log_msg, session_configs)
+            # 2. Глобальный лог для админов (консоль/файл/админский чат)
+            await log_event("forward_success", log_msg)
 
         except Exception as error:
             err_msg = (
@@ -339,8 +348,8 @@ async def forward_album_delayed(buffer_key: str, client: Client, user_id: int, s
                 f"📥 В: <b>{target_title}</b> [<code>{target_chat_id}</code>]\n"
                 f"⚠️ Ошибка: <code>{escape(str(error))}</code>"
             )
-            await log_event("forward_error", err_msg)
             await send_user_log(user_id, "error", err_msg, session_configs)
+            await log_event("forward_error", err_msg)
 
 
 async def forward_single_message(client: Client, message: Message, target_chat_id: int, transform_config: dict, user_id: int, source_chat_id: int, source_title: str, src_link: str, full_config: dict):
@@ -365,10 +374,10 @@ async def forward_single_message(client: Client, message: Message, target_chat_i
             f"📤 Из: <b>{source_title}</b> (<a href='{src_link}'>#{message.id}</a>)\n"
             f"📥 В: <b>{target_title}</b> (<a href='{dest_link}'>#{sent_msg.id}</a>)"
         )
-        # 1. Глобальный лог
-        await log_event("forward_success", log_msg)
-        # 2. Лог пользователю
+        # 1. Персональный лог для пользователя (в Telegram)
         await send_user_log(user_id, "success", log_msg, full_config)
+        # 2. Глобальный лог для админов (консоль/файл/админский чат)
+        await log_event("forward_success", log_msg)
 
     except Exception as error:
         err_msg = (
@@ -377,8 +386,8 @@ async def forward_single_message(client: Client, message: Message, target_chat_i
             f"📥 В: <b>{target_title}</b> [<code>{target_chat_id}</code>]\n"
             f"⚠️ Ошибка: <code>{escape(str(error))}</code>"
         )
-        await log_event("forward_error", err_msg)
         await send_user_log(user_id, "error", err_msg, full_config)
+        await log_event("forward_error", err_msg)
 
 
 async def handle_incoming_message(client: Client, message: Message, user_id: int, session_name: str):
@@ -401,8 +410,8 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
 
         if not is_message_allowed(message, export_mode.get("filters", {})):
             log_msg = f"ℹ️ <b>Отфильтровано</b>\nИсточник: <b>{source_title}</b>\nПост: <a href='{src_link}'>#{message.id}</a>"
-            await log_event("forward_filtered", log_msg)
             await send_user_log(user_id, "filtered", log_msg, full_config)
+            await log_event("forward_filtered", log_msg)
             return
 
         transform_config = export_mode.get("text_transform", full_config.get("text_transform", {}))
@@ -421,8 +430,8 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
 
     except Exception as error:
         err_msg = f"❌ Критическая ошибка в handle_incoming_message: {error}"
-        await log_event("bot_error", err_msg)
         await send_user_log(user_id, "error", err_msg, full_config)
+        await log_event("bot_error", err_msg)
     finally:
         await finish_message(source_chat_id, message.id)
 
@@ -465,8 +474,8 @@ async def start_forwarder_for_session(user_id: int, session_name: str, api_id: i
         await app.start()
         
         start_msg = f"🟢 <b>Сессия запущена</b>\nПользователь: <code>{user_id}</code>\nИмя: <code>{session_name}</code>"
-        await log_event("forwarding_enabled", start_msg)
         await send_user_log(user_id, "success", start_msg, session_config)
+        await log_event("forwarding_enabled", start_msg)
         
         async for _ in app.get_dialogs(): pass
 
