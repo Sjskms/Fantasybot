@@ -95,16 +95,24 @@ async def main_menu_callback_handler(callback_query: CallbackQuery):
 
 @router.callback_query(F.data == "profile")
 async def profile_callback_handler(callback_query: CallbackQuery):
-    """Раздел Профиль."""
+    """Раздел Профиль (универсальная распаковка данных пользователя)."""
     try:
         user_id = callback_query.from_user.id
         user_data = await Database.get_user(user_id)
 
         if user_data:
-            _, name, username, reg_date_str, _ = user_data
+            # Таблица users содержит 4 колонки: (user_id, name, username, registration_date)
+            name = user_data[1] if len(user_data) > 1 else (callback_query.from_user.full_name or "Пользователь")
+            username = user_data[2] if len(user_data) > 2 else callback_query.from_user.username
+            reg_date_str = user_data[3] if len(user_data) > 3 else None
 
-            reg_date_obj = datetime.datetime.fromisoformat(reg_date_str)
-            formatted_reg_date = reg_date_obj.strftime('%d.%m.%Y %H:%M')
+            formatted_reg_date = "неизвестно"
+            if reg_date_str:
+                try:
+                    reg_date_obj = datetime.datetime.fromisoformat(reg_date_str)
+                    formatted_reg_date = reg_date_obj.strftime('%d.%m.%Y %H:%M')
+                except Exception:
+                    formatted_reg_date = str(reg_date_str)
 
             session_status = await Database.get_user_sessions_list(user_id)
 
