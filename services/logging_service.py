@@ -1,8 +1,10 @@
 # services/logging_service.py
+import asyncio
 import datetime
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, Optional
 
 import aiofiles
@@ -12,21 +14,18 @@ from database import Database
 
 logger = logging.getLogger(__name__)
 
-# Чтобы пути в Pydroid3/Android не сбивались при перезапусках, привязываемся к директории проекта
+# Базовая директория проекта
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_FILE = os.path.join(BASE_DIR, "bot_logging_config.json")
 LOG_FILE_PATH = os.path.join(BASE_DIR, "bot_events.log")
 
 DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
-    # Главные тумблеры
     "bot_logging": True,
     "telegram_logging": True,
     "console_logging": True,
     "file_logging": True,
-    # Настройки назначения
-    "telegram_log_chat_id": None,  # int/str ID чата/канала или None (все админы)
-    "file_cleanup_period": "1_week",  # "1_day", "3_days", "1_week", "2_weeks", "1_month", "never"
-    # Детальные типы событий
+    "telegram_log_chat_id": None,
+    "file_cleanup_period": "1_week",
     "events": {
         "new_user": True,
         "session_added": True,
@@ -43,6 +42,7 @@ DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
 
 _current_config: Dict[str, Any] = DEFAULT_LOGGING_CONFIG.copy()
 _bot_ref: Optional[Bot] = None
+_last_cleanup_time: float = 0.0
 
 
 def set_logging_bot_instance(bot: Bot):
@@ -54,6 +54,13 @@ def set_logging_bot_instance(bot: Bot):
 def get_logging_bot_instance() -> Optional[Bot]:
     """Возвращает привязанный экземпляр Aiogram Bot."""
     return _bot_ref
+
+
+def strip_html_tags(text: str) -> str:
+    """Удаляет любые HTML-теги из строки для консоли и файла."""
+    if not text:
+        return ""
+    return re.sub(r"<[^>]+>", "", text)
 
 
 async def load_global_logging_config() -> Dict[str, Any]:
@@ -99,15 +106,11 @@ def get_cached_logging_config() -> Dict[str, Any]:
 
 
 async def append_to_log_file(event_key: str, message: str):
-    """Запись строки лога в текстовый файл bot_events.log с отметкой времени."""
-    clean_text = (
-        message.replace("<b>", "")
-        .replace("</b>", "")
-        .replace("<code>", "")
-        .replace("</code>", "")
-        .replace("<i>", "")
-        .replace("</i>", "")
-    )
+    """
+    БЫСТРАЯ ЗАПИСЬ (Append-Only): 
+    Открывает файл строго на дозапись («a»). Никакого чтения истории на лету!
+    """
+    clean_text = strip_html_tags(message).strip()
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_line = f"[{now_str}] [{event_key.upper()}] {clean_text}\n"
 
@@ -118,8 +121,21 @@ async def append_to_log_file(event_key: str, message: str):
         logger.error("Ошибка записи в файл логов: %s", e)
 
 
-async def cleanup_log_file(period: Optional[str] = None):
-    """Очищает файл логов от устаревших записей за указанный период."""
+async def cleanup_log_file(period: Optional[str] = None, force: bool = False):
+    """
+    ФОНОВАЯ ОЧИСТКА:
+    Выполняет чтение и фильтрацию файла логов строго по таймеру (не чаще 1 раза в 6 часов)
+    или принудительно (force=True при нажатии кнопки в меню).
+    """
+    global _last_cleanup_time
+    now = asyncio.get_event_loop().time()
+
+    # Если не принудительно и прошло менее 6 часов (21600 секунд) — пропускаем
+    if not force and (now - _last_cleanup_time < 21600):
+        return
+
+    _last_cleanup_time = now
+
     if not os.path.exists(LOG_FILE_PATH):
         return
 
@@ -129,7 +145,7 @@ async def cleanup_log_file(period: Optional[str] = None):
     if target_period == "delete_now":
         try:
             os.remove(LOG_FILE_PATH)
-            logger.info("Файл логов сразу удален.")
+            logger.info("Файл логов удален.")
         except Exception as e:
             logger.error("Ошибка при удалении файла логов: %s", e)
         return
@@ -144,10 +160,7 @@ async def cleanup_log_file(period: Optional[str] = None):
         "2_weeks": 14,
         "1_month": 30,
     }
-    max_days = days_map.get(target_period)
-    if not max_days:
-        return
-
+    max_days = days_map.get(target_period, 7)
     cutoff = datetime.datetime.now() - datetime.timedelta(days=max_days)
 
     try:
@@ -169,17 +182,35 @@ async def cleanup_log_file(period: Optional[str] = None):
 
         async with aiofiles.open(LOG_FILE_PATH, mode="w", encoding="utf-8") as f:
             await f.writelines(new_lines)
+        logger.info("Фоновая очистка файла логов завершена успешно.")
     except Exception as e:
         logger.error("Ошибка очистки файла логов: %s", e)
 
 
-async def log_event(event_key: str, message: str, extra_console: str = ""):
+async def get_user_info_block(user_id: Optional[int]) -> str:
+    """Динамически достает информацию о пользователе из базы данных для логов админа."""
+    if not user_id:
+        return ""
+    
+    try:
+        user_data = await Database.get_user(user_id)
+        if user_data:
+            name = user_data[1] if len(user_data) > 1 else "Не указано"
+            username = user_data[2] if len(user_data) > 2 else None
+            username_str = f"@{username}" if username else "нет"
+            return f"\n👤 <b>Пользователь:</b> {name} | ID: <code>{user_id}</code> | Username: {username_str}"
+    except Exception as e:
+        logger.debug("Не удалось получить информацию о пользователе %s: %s", user_id, e)
+    
+    return f"\n👤 <b>Пользователь ID:</b> <code>{user_id}</code>"
+
+
+async def log_event(event_key: str, message: str, extra_console: str = "", user_id: Optional[int] = None):
     """
-    ГЛОБАЛЬНОЕ логирование системы (для Администратора):
-    Сверяет event_key с настройками JSON:
-    1. Выводит в консоль (если включено console_logging)
-    2. Записывает в текстовый файл (если включено file_logging)
-    3. Отправляет в Telegram админам или в указанный админский чат
+    Глобальное логирование для администраторов.
+    1. Пишет в консоль (мгновенно).
+    2. Дописывает в конец файла без чтения всей истории (мгновенно, без лагов диска).
+    3. Рассылает в Telegram (в фоновом асинхронном режиме).
     """
     cfg = get_cached_logging_config()
 
@@ -187,38 +218,34 @@ async def log_event(event_key: str, message: str, extra_console: str = ""):
         return
 
     events_cfg = cfg.get("events", {})
-    is_event_enabled = events_cfg.get(event_key, True)
-
-    if not is_event_enabled:
+    if not events_cfg.get(event_key, True):
         return
+
+    # Обогащаем сообщение информацией о пользователе, если передан user_id
+    user_info_str = await get_user_info_block(user_id)
+    final_message = message + user_info_str
 
     # 1. Логирование в консоль
     if cfg.get("console_logging", True):
-        console_text = (
-            extra_console
-            if extra_console
-            else message.replace("<b>", "")
-            .replace("</b>", "")
-            .replace("<code>", "")
-            .replace("</code>", "")
-        )
+        console_text = extra_console if extra_console else strip_html_tags(final_message).strip()
         logger.info("[LOG:%s] %s", event_key.upper(), console_text)
 
-    # 2. Логирование в текстовый файл
+    # 2. Логирование в файл (чистый Append, без чтения диска!)
     if cfg.get("file_logging", True):
-        await append_to_log_file(event_key, message)
-        await cleanup_log_file()
+        await append_to_log_file(event_key, final_message)
+        # Вызов очистки с защитным таймером 6 часов (диск не перегружается)
+        asyncio.create_task(cleanup_log_file())
 
-    # 3. Логирование в Telegram для Администрации
+    # 3. Логирование в Telegram
     if cfg.get("telegram_logging", True) and _bot_ref:
+        safe_msg = final_message if len(final_message) <= 4000 else final_message[:3990] + "..."
         target_chat_id = cfg.get("telegram_log_chat_id")
 
-        # ВАЖНО: parse_mode для aiogram должен передаваться СТРОКОЙ "HTML", а не объектом из Pyrogram!
         if target_chat_id:
             try:
                 await _bot_ref.send_message(
                     chat_id=target_chat_id,
-                    text=message,
+                    text=safe_msg,
                     parse_mode="HTML",
                     disable_web_page_preview=True,
                 )
@@ -228,8 +255,8 @@ async def log_event(event_key: str, message: str, extra_console: str = ""):
             admin_ids = []
             try:
                 admin_ids = await Database.get_all_admin_ids()
-            except Exception as e:
-                logger.debug("Не удалось получить админов из БД: %s", e)
+            except Exception:
+                pass
 
             try:
                 from my_filters.admin_filter import get_config_admin_ids
@@ -243,9 +270,10 @@ async def log_event(event_key: str, message: str, extra_console: str = ""):
                 try:
                     await _bot_ref.send_message(
                         chat_id=admin_id,
-                        text=message,
+                        text=safe_msg,
                         parse_mode="HTML",
                         disable_web_page_preview=True,
                     )
+                    await asyncio.sleep(0.04)
                 except Exception:
                     pass
