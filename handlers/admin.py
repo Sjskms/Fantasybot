@@ -1,6 +1,7 @@
 # handlers/admin.py
 import asyncio
 import logging
+import os
 from html import escape
 from typing import Optional
 
@@ -11,6 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -20,6 +22,7 @@ from database import Database
 from keyboards import admin_kb
 from my_filters.admin_filter import IsAdmin, IsSuperAdmin
 from services.logging_service import (
+    LOG_FILE_PATH,
     cleanup_log_file,
     get_cached_logging_config,
     load_global_logging_config,
@@ -48,6 +51,19 @@ class LoggingManageStates(StatesGroup):
     waiting_for_log_chat_id = State()
 
 
+# --- КОМАНДЫ ДЛЯ АДМИНИСТРАТОРА ---
+
+@router.message(Command("admin", "adm"), IsAdmin())
+async def cmd_admin_menu(message: Message, state: FSMContext):
+    """Открывает главное меню администратора по команде /admin или /adm."""
+    await state.clear()
+    await message.answer(
+        "👑 <b>Панель администратора</b>",
+        reply_markup=admin_kb.main_menu,
+        parse_mode="HTML",
+    )
+
+
 # --- КЛАВИАТУРЫ ДЛЯ МЕНЮ ЛОГИРОВАНИЯ ---
 
 EVENT_TITLES = {
@@ -65,7 +81,7 @@ EVENT_TITLES = {
 
 
 def get_logging_main_kb(cfg: dict) -> InlineKeyboardMarkup:
-    """Главное меню настроек логирования."""
+    """Главное меню настроек логирования с кнопкой выгрузки файла."""
     bot_log_icon = "✅" if cfg.get("bot_logging", True) else "❌"
     tg_log_icon = "✅" if cfg.get("telegram_logging", True) else "❌"
     con_log_icon = "✅" if cfg.get("console_logging", True) else "❌"
@@ -91,6 +107,7 @@ def get_logging_main_kb(cfg: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"Логирование в файл: {file_log_icon}", callback_data="toggle_glog_file_logging")],
         [InlineKeyboardButton(text=f"🎯 Куда слать в TG: {chat_display}", callback_data="settings_log_chat_prompt")],
         [InlineKeyboardButton(text=f"📁 Очистка файла: {period_str}", callback_data="settings_log_cleanup_menu")],
+        [InlineKeyboardButton(text="📥 Выгрузить файл логов", callback_data="download_log_file")],
         [InlineKeyboardButton(text="⚙️ Настроить события логирования", callback_data="settings_logging_events")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="settings")],
     ]
@@ -140,6 +157,30 @@ def get_logging_events_kb(cfg: dict) -> InlineKeyboardMarkup:
 
     keyboard.append([InlineKeyboardButton(text="◀️ Назад к общим настройкам", callback_data="settings_logging")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+# --- ВЫГРУЗКА ФАЙЛА ЛОГОВ ---
+
+@router.callback_query(F.data == "download_log_file", IsAdmin())
+async def download_log_file_handler(callback_query: CallbackQuery):
+    """Выгружает и отправляет файл bot_events.log администратору."""
+    if not os.path.exists(LOG_FILE_PATH) or os.path.getsize(LOG_FILE_PATH) == 0:
+        await callback_query.answer("⚠️ Файл логов пока пуст или еще не создан!", show_alert=True)
+        return
+
+    try:
+        file_to_send = FSInputFile(LOG_FILE_PATH, filename="bot_events.log")
+        file_size_kb = round(os.path.getsize(LOG_FILE_PATH) / 1024, 2)
+        
+        await callback_query.message.answer_document(
+            document=file_to_send,
+            caption=f"📄 <b>Файл системных логов бота</b>\n📊 Размер: <code>{file_size_kb} KB</code>",
+            parse_mode="HTML"
+        )
+        await callback_query.answer("Логи успешно отправлены!")
+    except Exception as e:
+        logger.exception("Ошибка отправки файла логов: %s", e)
+        await callback_query.answer(f"❌ Ошибка выгрузки: {e}", show_alert=True)
 
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ПАРСИНГ РАССЫЛКИ ---
@@ -287,7 +328,7 @@ async def show_logging_main_menu(callback_query: CallbackQuery, state: FSMContex
     text = (
         "📜 <b>Управление логированием системы</b>\n\n"
         "Здесь вы можете настроить каналы отправки (Telegram, консоль, файл), "
-        "указать целевой чат и настроить периодичность автоочистки логов:"
+        "указать целевой чат, выгрузить файл или настроить периодичность автоочистки:"
     )
     await callback_query.message.edit_text(
         text,
@@ -704,7 +745,6 @@ async def execute_broadcast(callback_query: CallbackQuery, state: FSMContext, bo
         if uid == caller_id:
             continue
 
-        # Надежный цикл отправки с обработкой TelegramRetryAfter (FloodWait)
         while True:
             try:
                 if media_type == "photo":
@@ -723,14 +763,12 @@ async def execute_broadcast(callback_query: CallbackQuery, state: FSMContext, bo
                     await bot.send_message(uid, text, parse_mode="HTML", reply_markup=user_kb_markup)
 
                 sent_count += 1
-                break  # Успешно отправлено, выходим из цикла retry
+                break
 
             except TelegramRetryAfter as e:
-                # Telegram просит подождать перед следующей отправкой
                 wait_time = e.retry_after + 1
                 logger.warning(f"TelegramFloodWait: пауза {wait_time} секунд при рассылке.")
                 await asyncio.sleep(wait_time)
-                # Повторяем попытку для этого же пользователя в следующей итерации while True
 
             except TelegramAPIError as e:
                 err_str = str(e).lower()
@@ -739,14 +777,13 @@ async def execute_broadcast(callback_query: CallbackQuery, state: FSMContext, bo
                 else:
                     failed_count += 1
                     logger.warning("Ошибка рассылки пользователю %s: %s", uid, e)
-                break  # Выходим из while True при фатальной ошибке отправки
+                break
 
             except Exception as e:
                 failed_count += 1
                 logger.warning("Неизвестная ошибка рассылки пользователю %s: %s", uid, e)
                 break
 
-        # Пауза между пользователями (~33 сообщения в секунду) для избежания лимитов
         await asyncio.sleep(0.03)
 
     result_text = (
@@ -760,132 +797,10 @@ async def execute_broadcast(callback_query: CallbackQuery, state: FSMContext, bo
     await callback_query.answer()
 
 
-# --- УПРАВЛЕНИЕ АДМИНИСТРАТОРАМИ (IS_SUPER_ADMIN) ---
-
-def get_admin_management_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Добавить админа", callback_data="admin_add_prompt")],
-            [InlineKeyboardButton(text="➖ Удалить админа", callback_data="admin_remove_prompt")],
-            [InlineKeyboardButton(text="📋 Список админов", callback_data="admin_list")],
-            [InlineKeyboardButton(text="◀️ В меню", callback_data="admin_panel")],
-        ]
-    )
-
-
-@router.callback_query(F.data == "manage_admins", IsSuperAdmin())
-async def manage_admins_menu(callback_query: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback_query.message.edit_text(
-        "👑 <b>Управление администраторами</b>\n\nВыберите нужное действие:",
-        reply_markup=get_admin_management_kb(),
-        parse_mode="HTML",
-    )
-    await callback_query.answer()
-
-
-@router.callback_query(F.data == "manage_admins", IsAdmin())
-async def manage_admins_forbidden(callback_query: CallbackQuery):
-    await callback_query.answer(
-        "⛔️ Добавлять и удалять администраторов может только Главный администратор из config!",
-        show_alert=True,
-    )
-
-
-@router.callback_query(F.data == "admin_list", IsSuperAdmin())
-async def list_admins_handler(callback_query: CallbackQuery):
-    admin_ids = await Database.get_all_admin_ids()
-    if not admin_ids:
-        text = "📋 В базе данных пока нет назначенных администраторов."
-    else:
-        text = "📋 <b>Список ID администраторов в БД:</b>\n\n"
-        for idx, aid in enumerate(admin_ids, 1):
-            text += f"{idx}. <code>{aid}</code>\n"
-
-    await callback_query.message.edit_text(text, reply_markup=get_admin_management_kb(), parse_mode="HTML")
-    await callback_query.answer()
-
-
-@router.callback_query(F.data == "admin_add_prompt", IsSuperAdmin())
-async def prompt_add_admin(callback_query: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminManageStates.waiting_for_add_admin_id)
-    await callback_query.message.answer(
-        "✍️ Отправьте <b>Telegram ID</b> пользователя (целое число), которого хотите назначить администратором:",
-        parse_mode="HTML",
-    )
-    await callback_query.answer()
-
-
-@router.message(AdminManageStates.waiting_for_add_admin_id, IsSuperAdmin())
-async def process_add_admin(message: Message, state: FSMContext):
-    if not message.text or not message.text.strip().isdigit():
-        return await message.answer("⚠️ Введите корректный числовой ID пользователя (например: 123456789).")
-
-    new_admin_id = int(message.text.strip())
-    await Database.add_admin(new_admin_id)
-    await state.clear()
-
-    await message.answer(
-        f"✅ Пользователь <code>{new_admin_id}</code> успешно добавлен в администраторы!",
-        reply_markup=get_admin_management_kb(),
-        parse_mode="HTML",
-    )
-
-
-@router.callback_query(F.data == "admin_remove_prompt", IsSuperAdmin())
-async def prompt_remove_admin(callback_query: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminManageStates.waiting_for_remove_admin_id)
-    await callback_query.message.answer(
-        "✍️ Отправьте <b>Telegram ID</b> администратора, которого хотите снять с должности:",
-        parse_mode="HTML",
-    )
-    await callback_query.answer()
-
-
-@router.message(AdminManageStates.waiting_for_remove_admin_id, IsSuperAdmin())
-async def process_remove_admin(message: Message, state: FSMContext):
-    if not message.text or not message.text.strip().isdigit():
-        return await message.answer("⚠️ Введите корректный числовой ID администратора.")
-
-    target_id = int(message.text.strip())
-    await Database.remove_admin(target_id)
-    await state.clear()
-
-    await message.answer(
-        f"🗑 Пользователь <code>{target_id}</code> удален из администраторов.",
-        reply_markup=get_admin_management_kb(),
-        parse_mode="HTML",
-    )
-
-
-# --- КОМАНДЫ ДЛЯ СУПЕРАДМИНА ---
-
-@router.message(Command("add_admin"), IsSuperAdmin())
-async def cmd_add_admin(message: Message):
-    args = (message.text or "").split()
-    if len(args) < 2 or not args[1].isdigit():
-        return await message.answer("ℹ️ Использование: <code>/add_admin 123456789</code>", parse_mode="HTML")
-
-    aid = int(args[1])
-    await Database.add_admin(aid)
-    await message.answer(f"✅ Пользователь <code>{aid}</code> назначен администратором.", parse_mode="HTML")
-
-
-@router.message(Command("remove_admin"), IsSuperAdmin())
-async def cmd_remove_admin(message: Message):
-    args = (message.text or "").split()
-    if len(args) < 2 or not args[1].isdigit():
-        return await message.answer("ℹ️ Использование: <code>/remove_admin 123456789</code>", parse_package=False, parse_mode="HTML")
-
-    aid = int(args[1])
-    await Database.remove_admin(aid)
-    await message.answer(f"🗑 Пользователь <code>{aid}</code> удален из списка администраторов.", parse_mode="HTML")
-
-
 # --- НАВИГАЦИЯ ---
 
 @router.callback_query(F.data == "admin_panel", IsAdmin())
-async def loop_back_admin_main(callback_query: CallbackQuery, state: FSMContext):
+async def back_to_admin_main_menu(callback_query: CallbackQuery, state: FSMContext):
     await state.clear()
     try:
         await callback_query.message.edit_text(

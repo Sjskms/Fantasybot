@@ -44,10 +44,6 @@ async def start_handler(message: types.Message):
                 user_id=user_id
             )
 
-        is_admin = await check_is_admin(user_id)
-
-        # ИСПРАВЛЕНИЕ: Database.get_user_sessions возвращает список сессий, 
-        # поэтому для подсчета количества используем len()
         user_sessions = await Database.get_user_sessions(user_id)
         session_count = len(user_sessions) if user_sessions else 0
 
@@ -55,14 +51,13 @@ async def start_handler(message: types.Message):
             f"👋 <b>Привет, {user_full_name}!</b>\n\n"
             f"Добро пожаловать в систему автоматической пересылки и постинга контента!\n\n"
             f"📊 <b>Статус вашего аккаунта:</b>\n"
-            f"├ Активных сессий: <code>{session_count}</code>\n"
-            f"└ Права доступа: {'<code>Администратор 👑</code>' if is_admin else '<code>Пользователь 👤</code>'}\n\n"
+            f"└ Активных сессий: <code>{session_count}</code>\n\n"
             f"Выберите необходимый раздел в меню ниже 👇"
         )
 
         await message.answer(
             welcome_text,
-            reply_markup=get_main_menu_keyboard(is_admin=is_admin),
+            reply_markup=get_main_menu_keyboard(),
             parse_mode="HTML"
         )
     except Exception as e:
@@ -92,7 +87,7 @@ async def main_menu_callback_handler(callback_query: CallbackQuery):
         try:
             await callback_query.message.edit_text(
                 menu_text,
-                reply_markup=get_main_menu_keyboard(is_admin=is_admin),
+                reply_markup=get_main_menu_keyboard(),
                 parse_mode="HTML"
             )
         except TelegramBadRequest:
