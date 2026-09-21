@@ -20,10 +20,10 @@ CONFIG_FILE = os.path.join(BASE_DIR, "bot_logging_config.json")
 LOG_FILE_PATH = os.path.join(BASE_DIR, "bot_events.log")
 
 DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
-    "bot_logging": True,
-    "telegram_logging": True,
+    "bot_logging": False,
+    "telegram_logging": False,
     "console_logging": True,
-    "file_logging": True,
+    "file_logging": False,
     "telegram_log_chat_id": None,
     "file_cleanup_period": "1_week",
     "events": {
