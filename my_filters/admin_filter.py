@@ -4,12 +4,11 @@ from aiogram.filters import BaseFilter
 from aiogram.types import Message, CallbackQuery
 
 import config
-from database import Database
 
 
 def get_config_admin_ids() -> set[int]:
     """
-    Извлекает список ID администраторов из config.py.
+    Извлекает список ID администраторов строго из config.py.
     Поддерживает: ADMIN_ID (int/str) и ADMIN_IDS (list/set/tuple/str).
     """
     admins = set()
@@ -40,28 +39,19 @@ def get_config_admin_ids() -> set[int]:
 
 class IsAdmin(BaseFilter):
     """
-    Проверяет, является ли пользователь администратором (через config.py или БД).
+    Проверяет, является ли пользователь администратором строго по конфигурационному файлу config.py.
     """
     async def __call__(self, event: Union[Message, CallbackQuery]) -> bool:
         user = getattr(event, "from_user", None)
         if not user:
             return False
 
-        user_id = user.id
-
-        if user_id in get_config_admin_ids():
-            return True
-
-        try:
-            return await Database.is_admin(user_id)
-        except Exception:
-            return False
+        return user.id in get_config_admin_ids()
 
 
 class IsSuperAdmin(BaseFilter):
     """
-    Проверяет, является ли пользователь ГЛАВНЫМ администратором из config.py.
-    Только супер-админ может назначать и снимать других администраторов.
+    Проверяет, является ли пользователь Главным администратором из config.py.
     """
     async def __call__(self, event: Union[Message, CallbackQuery]) -> bool:
         user = getattr(event, "from_user", None)
