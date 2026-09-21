@@ -9,7 +9,8 @@ from handlers import admin, user, session_handler, account_login
 from middlewares.auth import AuthMiddleware
 from services.scheduler import start_scheduler
 from services.logging_service import set_logging_bot_instance, load_global_logging_config, log_event
-from services.Additional_Feature import restore_active_forwarders
+
+from services.forwarder.supervisor import restore_active_forwarders
 
 
 async def main():

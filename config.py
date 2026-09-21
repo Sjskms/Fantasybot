@@ -7,7 +7,7 @@ load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-DB_PATH = os.getenv("DB_PATH", "db.db") 
+DB_PATH = os.getenv("DB_PATH", "data/db.db") 
 
 
 API_ID = int(os.getenv("API_ID", 0)) 
