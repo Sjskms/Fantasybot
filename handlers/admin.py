@@ -5,7 +5,7 @@ from html import escape
 from typing import Optional
 
 from aiogram import Bot, F, Router, types
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -48,7 +48,7 @@ class LoggingManageStates(StatesGroup):
     waiting_for_log_chat_id = State()
 
 
-# --- КЛАВИАТУРЫ ДЛЯ МЕНЮ ЛОГИРОВАНИЯ (JSON) ---
+# --- КЛАВИАТУРЫ ДЛЯ МЕНЮ ЛОГИРОВАНИЯ ---
 
 EVENT_TITLES = {
     "new_user": "👤 Новый пользователь",
@@ -72,7 +72,7 @@ def get_logging_main_kb(cfg: dict) -> InlineKeyboardMarkup:
     file_log_icon = "✅" if cfg.get("file_logging", True) else "❌"
 
     chat_id_val = cfg.get("telegram_log_chat_id")
-    chat_display = f"<code>{chat_id_val}</code>" if chat_id_val else "Все админы"
+    chat_display = str(chat_id_val) if chat_id_val else "Все админы"
 
     period_map = {
         "1_day": "1 день",
@@ -89,7 +89,7 @@ def get_logging_main_kb(cfg: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"Логирование в телеграм: {tg_log_icon}", callback_data="toggle_glog_telegram_logging")],
         [InlineKeyboardButton(text=f"Логирование в консоль: {con_log_icon}", callback_data="toggle_glog_console_logging")],
         [InlineKeyboardButton(text=f"Логирование в файл: {file_log_icon}", callback_data="toggle_glog_file_logging")],
-        [InlineKeyboardButton(text=f"🎯 Куда слать в TG: {chat_display.replace('<code>','').replace('</code>','')}", callback_data="settings_log_chat_prompt")],
+        [InlineKeyboardButton(text=f"🎯 Куда слать в TG: {chat_display}", callback_data="settings_log_chat_prompt")],
         [InlineKeyboardButton(text=f"📁 Очистка файла: {period_str}", callback_data="settings_log_cleanup_menu")],
         [InlineKeyboardButton(text="⚙️ Настроить события логирования", callback_data="settings_logging_events")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="settings")],
@@ -277,7 +277,7 @@ async def settings_access_handler(callback_query: CallbackQuery):
     await callback_query.answer()
 
 
-# --- ХЭНДЛЕРЫ ЛОГИРОВАНИЯ (JSON) ---
+# --- ХЭНДЛЕРЫ ЛОГИРОВАНИЯ ---
 
 @router.callback_query(F.data == "settings_logging", IsAdmin())
 async def show_logging_main_menu(callback_query: CallbackQuery, state: FSMContext):
@@ -389,12 +389,12 @@ async def set_cleanup_period_option(callback_query: CallbackQuery):
     cfg = await load_global_logging_config()
 
     if option == "delete_now":
-        await cleanup_log_file("delete_now")
+        await cleanup_log_file("delete_now", force=True)
         await callback_query.answer("🔥 Файл логов полностью очищен и удален!", show_alert=True)
     else:
         cfg["file_cleanup_period"] = option
         await save_global_logging_config(cfg)
-        await cleanup_log_file(option)
+        await cleanup_log_file(option, force=True)
         await callback_query.answer("Период очистки сохранен!")
 
     await callback_query.message.edit_text(
@@ -419,7 +419,7 @@ async def show_logging_events_menu(callback_query: CallbackQuery):
 
 @router.callback_query(F.data.startswith("toggle_gevt_"), IsAdmin())
 async def toggle_event_logging_option(callback_query: CallbackQuery):
-    """Переключение конкретного типа события в JSON."""
+    """Переключение конкретного типа события."""
     event_key = callback_query.data.removeprefix("toggle_gevt_")
     cfg = await load_global_logging_config()
     events = cfg.setdefault("events", {})
@@ -442,7 +442,7 @@ async def toggle_event_logging_option(callback_query: CallbackQuery):
 
 @router.callback_query(F.data == "stats", IsAdmin())
 async def admin_stats_handler(callback_query: CallbackQuery):
-    """Отображает статистику регистраций за сегодня, неделю, месяц и за все время."""
+    """Отображает статистику пользователей."""
     total_users = await Database.get_total_users()
     users_today = await Database.get_users_registered_today()
     users_week = await Database.get_users_registered_this_week()
@@ -503,7 +503,7 @@ async def start_broadcast_flow(callback_query: CallbackQuery, state: FSMContext)
 
 @router.message(BroadcastStates.waiting_for_initial_content, IsAdmin())
 async def process_initial_broadcast_content(message: Message, state: FSMContext, bot: Bot):
-    text = message.html_text or message.caption or ""
+    text = message.html_text or ""
     media_type = None
     media_id = None
 
@@ -552,7 +552,7 @@ async def prompt_edit_text(callback_query: CallbackQuery, state: FSMContext):
 
 @router.message(BroadcastStates.waiting_for_text, IsAdmin())
 async def process_edit_text(message: Message, state: FSMContext, bot: Bot):
-    new_text = message.html_text or message.text or ""
+    new_text = message.html_text or ""
     if new_text.strip() == ".":
         new_text = ""
 
@@ -656,7 +656,7 @@ async def remove_buttons_handler(callback_query: CallbackQuery, state: FSMContex
     await callback_query.answer()
 
 
-# --- ЗАПУСК РАССЫЛКИ ---
+# --- ЗАПУСК РАССЫЛКИ С ЗАЩИТОЙ ОТ FLOODWAIT ---
 
 @router.callback_query(F.data == "bc_send_now", IsAdmin())
 async def execute_broadcast(callback_query: CallbackQuery, state: FSMContext, bot: Bot):
@@ -703,31 +703,51 @@ async def execute_broadcast(callback_query: CallbackQuery, state: FSMContext, bo
     for uid in recipients:
         if uid == caller_id:
             continue
-        try:
-            if media_type == "photo":
-                await bot.send_photo(uid, photo=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
-            elif media_type == "video":
-                await bot.send_video(uid, video=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
-            elif media_type == "animation":
-                await bot.send_animation(uid, animation=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
-            elif media_type == "voice":
-                await bot.send_voice(uid, voice=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
-            elif media_type == "audio":
-                await bot.send_audio(uid, audio=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
-            elif media_type == "document":
-                await bot.send_document(uid, document=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
-            else:
-                await bot.send_message(uid, text, parse_mode="HTML", reply_markup=user_kb_markup)
 
-            sent_count += 1
-        except TelegramAPIError as e:
-            if "bot was blocked by the user" in str(e).lower():
-                blocked_count += 1
-            else:
+        # Надежный цикл отправки с обработкой TelegramRetryAfter (FloodWait)
+        while True:
+            try:
+                if media_type == "photo":
+                    await bot.send_photo(uid, photo=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
+                elif media_type == "video":
+                    await bot.send_video(uid, video=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
+                elif media_type == "animation":
+                    await bot.send_animation(uid, animation=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
+                elif media_type == "voice":
+                    await bot.send_voice(uid, voice=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
+                elif media_type == "audio":
+                    await bot.send_audio(uid, audio=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
+                elif media_type == "document":
+                    await bot.send_document(uid, document=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
+                else:
+                    await bot.send_message(uid, text, parse_mode="HTML", reply_markup=user_kb_markup)
+
+                sent_count += 1
+                break  # Успешно отправлено, выходим из цикла retry
+
+            except TelegramRetryAfter as e:
+                # Telegram просит подождать перед следующей отправкой
+                wait_time = e.retry_after + 1
+                logger.warning(f"TelegramFloodWait: пауза {wait_time} секунд при рассылке.")
+                await asyncio.sleep(wait_time)
+                # Повторяем попытку для этого же пользователя в следующей итерации while True
+
+            except TelegramAPIError as e:
+                err_str = str(e).lower()
+                if "bot was blocked by the user" in err_str or "user is deactivated" in err_str or "chat not found" in err_str:
+                    blocked_count += 1
+                else:
+                    failed_count += 1
+                    logger.warning("Ошибка рассылки пользователю %s: %s", uid, e)
+                break  # Выходим из while True при фатальной ошибке отправки
+
+            except Exception as e:
                 failed_count += 1
-                logger.warning("Ошибка рассылки пользователю %s: %s", uid, e)
+                logger.warning("Неизвестная ошибка рассылки пользователю %s: %s", uid, e)
+                break
 
-        await asyncio.sleep(0.035)
+        # Пауза между пользователями (~33 сообщения в секунду) для избежания лимитов
+        await asyncio.sleep(0.03)
 
     result_text = (
         f"✅ <b>Рассылка {target_name} завершена!</b>\n\n"
@@ -842,7 +862,7 @@ async def process_remove_admin(message: Message, state: FSMContext):
 
 @router.message(Command("add_admin"), IsSuperAdmin())
 async def cmd_add_admin(message: Message):
-    args = message.text.split()
+    args = (message.text or "").split()
     if len(args) < 2 or not args[1].isdigit():
         return await message.answer("ℹ️ Использование: <code>/add_admin 123456789</code>", parse_mode="HTML")
 
@@ -853,9 +873,9 @@ async def cmd_add_admin(message: Message):
 
 @router.message(Command("remove_admin"), IsSuperAdmin())
 async def cmd_remove_admin(message: Message):
-    args = message.text.split()
+    args = (message.text or "").split()
     if len(args) < 2 or not args[1].isdigit():
-        return await message.answer("ℹ️ Использование: <code>/remove_admin 123456789</code>", parse_mode="HTML")
+        return await message.answer("ℹ️ Использование: <code>/remove_admin 123456789</code>", parse_package=False, parse_mode="HTML")
 
     aid = int(args[1])
     await Database.remove_admin(aid)
@@ -865,7 +885,7 @@ async def cmd_remove_admin(message: Message):
 # --- НАВИГАЦИЯ ---
 
 @router.callback_query(F.data == "admin_panel", IsAdmin())
-async def back_to_admin_main_menu(callback_query: CallbackQuery, state: FSMContext):
+async def loop_back_admin_main(callback_query: CallbackQuery, state: FSMContext):
     await state.clear()
     try:
         await callback_query.message.edit_text(

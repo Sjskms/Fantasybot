@@ -24,7 +24,7 @@ from keyboards.session_kb import (
     get_session_settings_keyboard,
 )
 
-from services.Additional_Feature import (
+from services.forwarder.state import (
     active_forwarder_tasks,
 )
 
@@ -132,49 +132,7 @@ def get_code_keyboard(code_buffer: str = "") -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="✅", callback_data="code_submit")
         ])
         return InlineKeyboardMarkup(inline_keyboard=buttons)
-    
-
-@router.callback_query(F.data.startswith("code_"))
-async def process_code_buttons(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    temp_client = data.get("temp_client")
-    
-    if not temp_client:
-        await callback.message.edit_text("Сессия истекла или произошла ошибка. Начните сначала.")
-        await state.clear()
-        return
-    
-    # Получаем текущий буфер кода и клиент
-    code_buffer = data.get("code_buffer", "")
-    temp_client = data.get("temp_client") 
-    action = callback.data.split("_")[1]
-
-    # Логика кнопок
-    if action == "back":
-        code_buffer = code_buffer[:-1]
-    elif action == "submit":
-        if not code_buffer:
-            return await callback.answer("Введите код!")
-        # Здесь логика sign_in
-        await finalize_sign_in(callback, state, code_buffer)
-        return
-    else:
-        # Добавляем цифру (например, ограничим длину до 5-6 знаков)
-        if len(code_buffer) < 6:
-            code_buffer += action
-        else:
-            return await callback.answer("Код слишком длинный!")
-
-    # Обновляем состояние
-    await state.update_data(code_buffer=code_buffer)
-    
-    # Обновляем сообщение с новым кодом
-    display_text = f"🔢 Введите 5-значный код, который пришел в Telegram:\n\nВведите код: {code_buffer}"
-    await callback.message.edit_text(display_text, reply_markup=get_code_keyboard(code_buffer))
-    await callback.answer()
-    
-        
-                
+      
 
 @router.callback_query(SessionAdd.waiting_for_code, F.data.startswith("code_"))
 async def process_code_callback(callback: types.CallbackQuery, state: FSMContext):

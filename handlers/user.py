@@ -1,3 +1,5 @@
+# handlers/user.py
+import html
 import datetime
 from aiogram import F, Router, types
 from aiogram.filters import Command
@@ -5,9 +7,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from aiogram.exceptions import TelegramBadRequest
 
 from database import Database
-from my_filters.admin_filter import IsAdmin
 from services.logging_service import log_event
-
 from keyboards.user_kb import (
     get_main_menu_keyboard,
     get_profile_keyboard,
@@ -16,11 +16,16 @@ from keyboards.user_kb import (
 router = Router()
 
 
+async def check_is_admin(user_id: int) -> bool:
+    """Вспомогательная функция для быстрой и надежной проверки прав админа"""
+    return await Database.is_admin(user_id)
+
+
 @router.message(Command("start"))
 async def start_handler(message: types.Message):
     try:
         user_id = message.from_user.id
-        user_full_name = message.from_user.full_name or "Пользователь"
+        user_full_name = html.escape(message.from_user.full_name or "Пользователь")
         user_username = message.from_user.username
         registration_date = datetime.datetime.now().isoformat()
 
@@ -28,24 +33,27 @@ async def start_handler(message: types.Message):
         if not await Database.user_exists(user_id):
             await Database.add_user(user_id, user_full_name, user_username, registration_date)
             
-            # Логируем регистрацию нового пользователя
+            # Логируем регистрацию нового пользователя с передачей user_id для блока админа
             username_str = f"@{user_username}" if user_username else "не задан"
             await log_event(
                 "new_user",
                 f"👤 <b>Новый пользователь!</b>\n"
                 f"├ Имя: <b>{user_full_name}</b>\n"
                 f"├ ID: <code>{user_id}</code>\n"
-                f"└ Username: {username_str}"
+                f"└ Username: {username_str}",
+                user_id=user_id
             )
 
-        is_admin = await IsAdmin()(message)
+        is_admin = await check_is_admin(user_id)
 
+        # ИСПРАВЛЕНИЕ: Database.get_user_sessions возвращает список сессий, 
+        # поэтому для подсчета количества используем len()
         user_sessions = await Database.get_user_sessions(user_id)
         session_count = len(user_sessions) if user_sessions else 0
 
         welcome_text = (
             f"👋 <b>Привет, {user_full_name}!</b>\n\n"
-            f"Добро пожаловать в систему автоматической пересылки и постингу контента!\n\n"
+            f"Добро пожаловать в систему автоматической пересылки и постинга контента!\n\n"
             f"📊 <b>Статус вашего аккаунта:</b>\n"
             f"├ Активных сессий: <code>{session_count}</code>\n"
             f"└ Права доступа: {'<code>Администратор 👑</code>' if is_admin else '<code>Пользователь 👤</code>'}\n\n"
@@ -58,7 +66,7 @@ async def start_handler(message: types.Message):
             parse_mode="HTML"
         )
     except Exception as e:
-        await log_event("bot_error", f"❌ Ошибка в команде /start: {e}")
+        await log_event("bot_error", f"❌ Ошибка в команде /start: {e}", user_id=message.from_user.id)
 
 
 @router.callback_query(F.data == "main_menu")
@@ -66,9 +74,11 @@ async def main_menu_callback_handler(callback_query: CallbackQuery):
     """Возврат в Главное меню."""
     try:
         user_id = callback_query.from_user.id
-        user_full_name = callback_query.from_user.full_name or "Пользователь"
+        user_full_name = html.escape(callback_query.from_user.full_name or "Пользователь")
         
-        is_admin = await IsAdmin()(callback_query.message)
+        is_admin = await check_is_admin(user_id)
+        
+        # ИСПРАВЛЕНИЕ: Аналогично исправлен подсчет сессий через Database.get_user_sessions
         user_sessions = await Database.get_user_sessions(user_id)
         session_count = len(user_sessions) if user_sessions else 0
 
@@ -90,31 +100,37 @@ async def main_menu_callback_handler(callback_query: CallbackQuery):
             
         await callback_query.answer()
     except Exception as e:
-        await log_event("bot_error", f"❌ Ошибка в колбэке main_menu: {e}")
+        await log_event("bot_error", f"❌ Ошибка в колбэке main_menu: {e}", user_id=callback_query.from_user.id)
 
 
 @router.callback_query(F.data == "profile")
 async def profile_callback_handler(callback_query: CallbackQuery):
-    """Раздел Профиль (универсальная распаковка данных пользователя)."""
+    """Раздел Профиль."""
     try:
         user_id = callback_query.from_user.id
         user_data = await Database.get_user(user_id)
 
         if user_data:
-            # Таблица users содержит 4 колонки: (user_id, name, username, registration_date)
-            name = user_data[1] if len(user_data) > 1 else (callback_query.from_user.full_name or "Пользователь")
-            username = user_data[2] if len(user_data) > 2 else callback_query.from_user.username
+            name = html.escape(user_data[1] if len(user_data) > 1 and user_data[1] else "Без имени")
+            username = user_data[2] if len(user_data) > 2 and user_data[2] else None
             reg_date_str = user_data[3] if len(user_data) > 3 else None
 
-            formatted_reg_date = "неизвестно"
             if reg_date_str:
                 try:
                     reg_date_obj = datetime.datetime.fromisoformat(reg_date_str)
                     formatted_reg_date = reg_date_obj.strftime('%d.%m.%Y %H:%M')
                 except Exception:
-                    formatted_reg_date = str(reg_date_str)
+                    formatted_reg_date = reg_date_str
+            else:
+                formatted_reg_date = "Не указана"
 
-            session_status = await Database.get_user_sessions_list(user_id)
+            # Получаем сессии и форматируем список
+            sessions = await Database.get_user_sessions_list(user_id)
+            if sessions:
+                session_lines = [f"  ▫️ <code>{row[0]}</code>" for row in sessions]
+                sessions_text = "\n".join(session_lines)
+            else:
+                sessions_text = "  <i>Сессий пока нет</i>"
 
             profile_text = (
                 f"👤 <b>Ваш Профиль</b>\n\n"
@@ -122,7 +138,7 @@ async def profile_callback_handler(callback_query: CallbackQuery):
                 f"📛 <b>Имя:</b> {name}\n"
                 f"🌐 <b>Username:</b> @{username if username else 'не задан'}\n"
                 f"📅 <b>Регистрация:</b> {formatted_reg_date}\n\n"
-                f"📱 <b>Подключенные сессии:</b>\n{session_status}"
+                f"📱 <b>Подключенные сессии:</b>\n{sessions_text}"
             )
         else:
             profile_text = "❌ Не удалось найти данные профиля. Нажмите /start."
@@ -138,7 +154,7 @@ async def profile_callback_handler(callback_query: CallbackQuery):
 
         await callback_query.answer()
     except Exception as e:
-        await log_event("bot_error", f"❌ Ошибка в колбэке profile: {e}")
+        await log_event("bot_error", f"❌ Ошибка в колбэке profile: {e}", user_id=callback_query.from_user.id)
 
 
 @router.callback_query(F.data == "help_instruction")
@@ -174,7 +190,7 @@ async def help_instruction_handler(callback_query: CallbackQuery):
             pass
         await callback_query.answer()
     except Exception as e:
-        await log_event("bot_error", f"❌ Ошибка в колбэке help_instruction: {e}")
+        await log_event("bot_error", f"❌ Ошибка в колбэке help_instruction: {e}", user_id=callback_query.from_user.id)
 
 
 @router.callback_query(F.data == "security_info")
@@ -205,4 +221,4 @@ async def security_info_handler(callback_query: CallbackQuery):
             pass
         await callback_query.answer()
     except Exception as e:
-        await log_event("bot_error", f"❌ Ошибка в колбэке security_info: {e}")
+        await log_event("bot_error", f"❌ Ошибка в колбэке security_info: {e}", user_id=callback_query.from_user.id)
