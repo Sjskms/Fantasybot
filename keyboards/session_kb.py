@@ -3,7 +3,11 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from typing import Any, Dict, List, Set
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from services.Additional_Feature import has_session_unapplied_changes
+
+from services.forwarder.state import (
+    has_session_unapplied_changes,
+)
+
 from database import Database
 db = Database() 
 
@@ -96,7 +100,7 @@ def get_text_transform_keyboard(session_name: str, transform_config: dict) -> In
         [InlineKeyboardButton(text="🔄 Добавить замену слова", callback_data=f"tt_addword_{session_name}")],
         [InlineKeyboardButton(text="🔗 Добавить замену ссылки", callback_data=f"tt_addlink_{session_name}")],
         [InlineKeyboardButton(text="🗑 Очистить все замены", callback_data=f"tt_clear_{session_name}")],
-        [InlineKeyboardButton(text="⬅️ Назад к сессии", callback_data=f"manage_session_{session_name}")]
+        [InlineKeyboardButton(text="⬅️ Назад к сессии", callback_data=f"session_config_{session_name}")]
     ])
     
     
@@ -299,6 +303,6 @@ def get_logging_settings_keyboard(session_name: str, log_config: dict) -> Inline
         [InlineKeyboardButton(text=f"Отфильтровано: {filtered_icon}", callback_data=f"toggle_log_{session_name}_filtered")],
         [InlineKeyboardButton(text=f"Ошибки отправки: {errors_icon}", callback_data=f"toggle_log_{session_name}_errors")],
         [InlineKeyboardButton(text=f"🎯 Получатель: {chat_display}", callback_data=f"toggle_log_{session_name}_chatprompt")],
-        [InlineKeyboardButton(text="◀️ Назад к сессии", callback_data=f"manage_session_{session_name}")]
+        [InlineKeyboardButton(text="◀️ Назад к сессии", callback_data=f"session_config_{session_name}")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
