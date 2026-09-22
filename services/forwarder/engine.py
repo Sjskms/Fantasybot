@@ -1,5 +1,6 @@
 # services/forwarder/engine.py
 import asyncio
+import copy
 import logging
 from html import escape
 
@@ -13,6 +14,7 @@ from pyrogram.types import (
     InputMediaDocument,
 )
 
+from database import Database
 from services.logging_service import log_event, get_logging_bot_instance
 from services.forwarder.state import (
     media_group_buffers,
@@ -30,6 +32,57 @@ from services.forwarder.transformer import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def record_channel_stat(
+    user_id: int,
+    session_name: str,
+    channel_id: int,
+    stat_type: str,
+    count: int = 1,
+):
+    """
+    Увеличивает счетчик статистики конкретного канала:
+    stat_type: 'forwarded', 'filtered', 'errors'
+    """
+    key = (user_id, session_name)
+    cfg = loaded_configs.get(key)
+    if not cfg:
+        cfg = await Database.get_session_configs(user_id, session_name) or {}
+        loaded_configs[key] = cfg
+
+    channels = cfg.setdefault("channels", {})
+    ch_key = str(channel_id)
+
+    if ch_key in channels:
+        ch_stats = channels[ch_key].setdefault("stats", {
+            "forwarded": 0,
+            "filtered": 0,
+            "errors": 0,
+        })
+        ch_stats[stat_type] = ch_stats.get(stat_type, 0) + count
+        
+        # Фоновое сохранение в базу данных
+        try:
+            await Database.update_session_configs(user_id, session_name, cfg)
+        except Exception as e:
+            logger.debug("Ошибка сохранения статистики канала: %s", e)
+
+
+def calculate_session_stats(session_configs: dict) -> tuple[int, int, int]:
+    """Считает общую сумму (переслано, отфильтровано, ошибки) по всем каналам."""
+    total_forwarded = 0
+    total_filtered = 0
+    total_errors = 0
+
+    channels = session_configs.get("channels", {})
+    for _, ch_data in channels.items():
+        stats = ch_data.get("stats", {})
+        total_forwarded += stats.get("forwarded", 0)
+        total_filtered += stats.get("filtered", 0)
+        total_errors += stats.get("errors", 0)
+
+    return total_forwarded, total_filtered, total_errors
 
 
 async def send_user_log(
@@ -117,7 +170,13 @@ def make_message_link(chat_id: int, message_id: int, username: str = None) -> st
     return f"https://t.me/c/{str_id.lstrip('-')}/{message_id}"
 
 
-async def forward_album_delayed(buffer_key: str, client: Client, user_id: int, session_configs: dict):
+async def forward_album_delayed(
+    buffer_key: str,
+    client: Client,
+    user_id: int,
+    session_name: str,
+    session_configs: dict,
+):
     await asyncio.sleep(1.5)
     buffer = media_group_buffers.pop(buffer_key, None)
     if not buffer:
@@ -170,6 +229,8 @@ async def forward_album_delayed(buffer_key: str, client: Client, user_id: int, s
                 f"📤 Из: <b>{source_title}</b> (<a href='{src_link}'>#{messages[0].id}</a>)\n"
                 f"📥 В: <b>{target_title}</b> (<a href='{dest_link}'>#{sent_msg_id}</a>)"
             )
+            # Статистика: переслано
+            await record_channel_stat(user_id, session_name, source_chat, "forwarded")
             await send_user_log(user_id, "success", log_msg, session_configs)
             await log_event("forward_success", log_msg, user_id=user_id)
 
@@ -180,6 +241,8 @@ async def forward_album_delayed(buffer_key: str, client: Client, user_id: int, s
                 f"📥 В: <b>{target_title}</b> [<code>{target_chat_id}</code>]\n"
                 f"⚠️ Ошибка: <code>{escape(str(error))}</code>"
             )
+            # Статистика: ошибка
+            await record_channel_stat(user_id, session_name, source_chat, "errors")
             await send_user_log(user_id, "error", err_msg, session_configs)
             await log_event("forward_error", err_msg, user_id=user_id)
 
@@ -190,6 +253,7 @@ async def forward_single_message(
     target_chat_id: int,
     transform_config: dict,
     user_id: int,
+    session_name: str,
     source_chat_id: int,
     source_title: str,
     src_link: str,
@@ -216,6 +280,8 @@ async def forward_single_message(
             f"📤 Из: <b>{source_title}</b> (<a href='{src_link}'>#{message.id}</a>)\n"
             f"📥 В: <b>{target_title}</b> (<a href='{dest_link}'>#{sent_msg.id}</a>)"
         )
+        # Статистика: переслано
+        await record_channel_stat(user_id, session_name, source_chat_id, "forwarded")
         await send_user_log(user_id, "success", log_msg, full_config)
         await log_event("forward_success", log_msg, user_id=user_id)
 
@@ -226,6 +292,8 @@ async def forward_single_message(
             f"📥 В: <b>{target_title}</b> [<code>{target_chat_id}</code>]\n"
             f"⚠️ Ошибка: <code>{escape(str(error))}</code>"
         )
+        # Статистика: ошибка
+        await record_channel_stat(user_id, session_name, source_chat_id, "errors")
         await send_user_log(user_id, "error", err_msg, full_config)
         await log_event("forward_error", err_msg, user_id=user_id)
 
@@ -238,7 +306,7 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
     if not await claim_message(source_chat_id, message.id):
         return
 
-    full_config = copy_dict = dict(loaded_configs.get((user_id, session_name), {}))
+    full_config = copy.deepcopy(loaded_configs.get((user_id, session_name), {}))
     try:
         channels_config = full_config.get("channels", {})
         export_channels = get_export_channels(channels_config)
@@ -253,6 +321,8 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
 
         if not is_message_allowed(message, export_mode.get("filters", {})):
             log_msg = f"ℹ️ <b>Отфильтровано</b>\nИсточник: <b>{source_title}</b>\nПост: <a href='{src_link}'>#{message.id}</a>"
+            # Статистика: отфильтровано
+            await record_channel_stat(user_id, session_name, source_chat_id, "filtered")
             await send_user_log(user_id, "filtered", log_msg, full_config)
             await log_event("forward_filtered", log_msg, user_id=user_id)
             return
@@ -262,7 +332,9 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
         if message.media_group_id:
             buffer_key = f"{source_chat_id}:{message.media_group_id}"
             if buffer_key not in media_group_buffers:
-                task = asyncio.create_task(forward_album_delayed(buffer_key, client, user_id, full_config))
+                task = asyncio.create_task(
+                    forward_album_delayed(buffer_key, client, user_id, session_name, full_config)
+                )
                 media_group_buffers[buffer_key] = {
                     "messages": [message],
                     "task": task,
@@ -277,7 +349,7 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
         for target_chat_id in target_chats:
             await forward_single_message(
                 client, message, target_chat_id, transform_config,
-                user_id, source_chat_id, source_title, src_link, full_config
+                user_id, session_name, source_chat_id, source_title, src_link, full_config
             )
 
     except Exception as error:
