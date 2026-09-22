@@ -81,14 +81,15 @@ EVENT_TITLES = {
 
 
 def get_logging_main_kb(cfg: dict) -> InlineKeyboardMarkup:
-    """Главное меню настроек логирования с кнопкой выгрузки файла."""
+    """Главное меню настроек логирования."""
     bot_log_icon = "✅" if cfg.get("bot_logging", True) else "❌"
     tg_log_icon = "✅" if cfg.get("telegram_logging", True) else "❌"
     con_log_icon = "✅" if cfg.get("console_logging", True) else "❌"
     file_log_icon = "✅" if cfg.get("file_logging", True) else "❌"
 
     chat_id_val = cfg.get("telegram_log_chat_id")
-    chat_display = str(chat_id_val) if chat_id_val else "Все админы"
+    # Изменено: вместо 'Все админы' пишем 'Админу'
+    chat_display = str(chat_id_val) if chat_id_val else "Админу"
 
     period_map = {
         "1_day": "1 день",
@@ -362,7 +363,7 @@ async def prompt_log_chat_id(callback_query: CallbackQuery, state: FSMContext):
     await state.set_state(LoggingManageStates.waiting_for_log_chat_id)
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Сбросить (отправлять всем админам)", callback_data="reset_log_chat_id")],
+            [InlineKeyboardButton(text="🔄 Сбросить (отправлять Админу)", callback_data="reset_log_chat_id")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="settings_logging")],
         ]
     )
@@ -404,7 +405,7 @@ async def reset_log_chat_id_handler(callback_query: CallbackQuery, state: FSMCon
     await state.clear()
 
     await callback_query.message.edit_text(
-        "✅ Получатель сброшен. Логи будут отправляться <b>всем администраторам</b>.",
+        "✅ Получатель сброшен. Логи будут отправляться <b>Админу</b>.",
         reply_markup=get_logging_main_kb(cfg),
         parse_mode="HTML",
     )
