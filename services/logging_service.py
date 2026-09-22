@@ -14,15 +14,15 @@ from database import Database
 
 logger = logging.getLogger(__name__)
 
-# Базовая директория проекта
+# Фиксированный путь к файлам логирования в корне проекта
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_FILE = os.path.join(BASE_DIR, "bot_logging_config.json")
 LOG_FILE_PATH = os.path.join(BASE_DIR, "bot_events.log")
 
 DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
-    "bot_logging": False,
-    "telegram_logging": False,
-    "console_logging": True,
+    "bot_logging": True,
+    "telegram_logging": True,
+    "console_logging": False,
     "file_logging": False,
     "telegram_log_chat_id": None,
     "file_cleanup_period": "1_week",
@@ -64,7 +64,11 @@ def strip_html_tags(text: str) -> str:
 
 
 async def load_global_logging_config() -> Dict[str, Any]:
-    """Загружает глобальные настройки логирования из JSON-файла."""
+    """
+    Загружает глобальные настройки логирования из JSON-файла.
+    ВНИМАНИЕ: Если файл существует, существующие настройки пользователя сохраняются 
+    и НЕ перезаписываются дефолтными значениями!
+    """
     global _current_config
 
     if not os.path.exists(CONFIG_FILE):
@@ -75,17 +79,27 @@ async def load_global_logging_config() -> Dict[str, Any]:
     try:
         async with aiofiles.open(CONFIG_FILE, mode="r", encoding="utf-8") as f:
             content = await f.read()
+            if not content.strip():
+                _current_config = DEFAULT_LOGGING_CONFIG.copy()
+                await save_global_logging_config(_current_config)
+                return _current_config
             loaded = json.loads(content)
-            merged = DEFAULT_LOGGING_CONFIG.copy()
-            merged.update(loaded)
-            if "events" in loaded and isinstance(loaded["events"], dict):
-                merged["events"] = DEFAULT_LOGGING_CONFIG["events"].copy()
-                merged["events"].update(loaded["events"])
-            _current_config = merged
-            return _current_config
+
+        # Берем сохраненный конфиг пользователя за основу
+        merged = DEFAULT_LOGGING_CONFIG.copy()
+        merged.update(loaded)
+
+        # Отдельно сохраняем значения вложенных событий, не затирая пользовательские тумблеры
+        if "events" in loaded and isinstance(loaded["events"], dict):
+            user_events = DEFAULT_LOGGING_CONFIG["events"].copy()
+            user_events.update(loaded["events"])
+            merged["events"] = user_events
+
+        _current_config = merged
+        return _current_config
+
     except Exception as e:
-        logger.error("Ошибка при чтении %s: %s", CONFIG_FILE, e)
-        _current_config = DEFAULT_LOGGING_CONFIG.copy()
+        logger.error("Ошибка при чтении %s: %s. Конфиг НЕ сброшен.", CONFIG_FILE, e)
         return _current_config
 
 
@@ -106,10 +120,7 @@ def get_cached_logging_config() -> Dict[str, Any]:
 
 
 async def append_to_log_file(event_key: str, message: str):
-    """
-    БЫСТРАЯ ЗАПИСЬ (Append-Only): 
-    Открывает файл строго на дозапись («a»). Никакого чтения истории на лету!
-    """
+    """Быстрая запись строки лога в текстовый файл."""
     clean_text = strip_html_tags(message).strip()
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_line = f"[{now_str}] [{event_key.upper()}] {clean_text}\n"
@@ -122,15 +133,10 @@ async def append_to_log_file(event_key: str, message: str):
 
 
 async def cleanup_log_file(period: Optional[str] = None, force: bool = False):
-    """
-    ФОНОВАЯ ОЧИСТКА:
-    Выполняет чтение и фильтрацию файла логов строго по таймеру (не чаще 1 раза в 6 часов)
-    или принудительно (force=True при нажатии кнопки в меню).
-    """
+    """Очищает файл логов от устаревших записей (не чаще раза в 6 часов)."""
     global _last_cleanup_time
     now = asyncio.get_event_loop().time()
 
-    # Если не принудительно и прошло менее 6 часов (21600 секунд) — пропускаем
     if not force and (now - _last_cleanup_time < 21600):
         return
 
@@ -182,7 +188,6 @@ async def cleanup_log_file(period: Optional[str] = None, force: bool = False):
 
         async with aiofiles.open(LOG_FILE_PATH, mode="w", encoding="utf-8") as f:
             await f.writelines(new_lines)
-        logger.info("Фоновая очистка файла логов завершена успешно.")
     except Exception as e:
         logger.error("Ошибка очистки файла логов: %s", e)
 
@@ -208,9 +213,11 @@ async def get_user_info_block(user_id: Optional[int]) -> str:
 async def log_event(event_key: str, message: str, extra_console: str = "", user_id: Optional[int] = None):
     """
     Глобальное логирование для администраторов.
-    1. Пишет в консоль (мгновенно).
-    2. Дописывает в конец файла без чтения всей истории (мгновенно, без лагов диска).
-    3. Рассылает в Telegram (в фоновом асинхронном режиме).
+    1. Пишет в консоль (если включено console_logging).
+    2. Дописывает в текстовый файл bot_events.log (если включено file_logging).
+    3. Отправляет в Telegram (если включено telegram_logging):
+       - В целевой канал/чат (если задан telegram_log_chat_id).
+       - Админу из config.py (если chat_id не задан).
     """
     cfg = get_cached_logging_config()
 
@@ -221,7 +228,6 @@ async def log_event(event_key: str, message: str, extra_console: str = "", user_
     if not events_cfg.get(event_key, True):
         return
 
-    # Обогащаем сообщение информацией о пользователе, если передан user_id
     user_info_str = await get_user_info_block(user_id)
     final_message = message + user_info_str
 
@@ -230,10 +236,9 @@ async def log_event(event_key: str, message: str, extra_console: str = "", user_
         console_text = extra_console if extra_console else strip_html_tags(final_message).strip()
         logger.info("[LOG:%s] %s", event_key.upper(), console_text)
 
-    # 2. Логирование в файл (чистый Append, без чтения диска!)
+    # 2. Логирование в файл
     if cfg.get("file_logging", True):
         await append_to_log_file(event_key, final_message)
-        # Вызов очистки с защитным таймером 6 часов (диск не перегружается)
         asyncio.create_task(cleanup_log_file())
 
     # 3. Логирование в Telegram
@@ -252,19 +257,12 @@ async def log_event(event_key: str, message: str, extra_console: str = "", user_
             except Exception as e:
                 logger.error("Ошибка отправки глобального лога в чат %s: %s", target_chat_id, e)
         else:
-            admin_ids = []
-            try:
-                admin_ids = await Database.get_all_admin_ids()
-            except Exception:
-                pass
-
+            # Отправка строго администраторам из config.py
             try:
                 from my_filters.admin_filter import get_config_admin_ids
-                for ca in get_config_admin_ids():
-                    if ca not in admin_ids:
-                        admin_ids.append(ca)
+                admin_ids = list(get_config_admin_ids())
             except Exception:
-                pass
+                admin_ids = []
 
             for admin_id in admin_ids:
                 try:
