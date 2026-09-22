@@ -4,6 +4,9 @@ from typing import Any, Dict, List, Set
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from services.forwarder.engine import (
+   calculate_session_stats,
+)
 from services.forwarder.state import (
     has_session_unapplied_changes,
 )
@@ -31,7 +34,17 @@ skip_password_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Пропустить (у меня нет 2FA)", callback_data="skip_2fa_password")]
 ])
 
+def get_session_stats_keyboard(session_name: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Подробная статистика", callback_data=f"session_stats_detailed_{session_name}")],
+        [InlineKeyboardButton(text="◀️ Назад к сессии", callback_data=f"manage_session_{session_name}")]
+    ])
+    
+    
+    
 
+    
+    
 
 def get_forwarding_menu_keyboard(
     session_name: str,
@@ -140,6 +153,11 @@ def get_session_management_keyboard(
                     callback_data=f"session_logging_{session_name}",
                 )
             ],
+            [
+                InlineKeyboardButton(
+                  text="📊 Статистика",
+                   callback_data=f"session_stats_{session_name}"),
+             ],
             [
                 InlineKeyboardButton(
                     text="❌ Удалить сессию",
