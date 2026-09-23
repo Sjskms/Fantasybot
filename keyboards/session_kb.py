@@ -37,7 +37,7 @@ skip_password_kb = InlineKeyboardMarkup(inline_keyboard=[
 def get_session_stats_keyboard(session_name: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Подробная статистика", callback_data=f"session_stats_detailed_{session_name}")],
-        [InlineKeyboardButton(text="◀️ Назад к сессии", callback_data=f"manage_session_{session_name}")]
+        [InlineKeyboardButton(text="◀️ Назад к сессии", callback_data=f"session_config_{session_name}")]
     ])
     
     
