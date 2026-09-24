@@ -139,106 +139,72 @@ def build_channels_keyboard(
 from services.forwarder.state import client_instances
 
 
-async def fetch_available_channels(
-    user_id: int,
-    session_name: str,
-    mode: str,
-) -> list[dict]:
-    """
-    Получает каналы через уже работающий forwarder-клиент.
-    Новый клиент с той же session_string не создается.
-    """
+async def fetch_available_channels(user_id: int, session_name: str, mode: str) -> list[dict]:
     task_key = (user_id, session_name)
-
+    
+    # 1. Сначала ищем среди уже запущенных активных клиентов
     client = client_instances.get(task_key)
     temporary_client = False
 
-    # Используем существующее подключение
+    # 2. Если активного клиента нет, проверяем статус в базе данных
     if client is None or not client.is_connected:
-        session_string = await Database.get_session_string(
-            user_id,
-            session_name,
-        )
-
-        if not session_string:
-            logger.warning(
-                "Не найдена session_string: user=%s, session=%s",
-                user_id,
-                session_name,
-            )
+        is_posting_enabled = await Database.get_session_posting_status(user_id, session_name)
+        
+        # ВНИМАНИЕ: Если пересылка включена, клиент ТАК ИЛИ ИНАЧЕ работает в фоне. 
+        # Если клиент не найден в памяти, но пересылка включена — это рассинхрон. 
+        # Пытаться запускать временный клиент опасно (будет AUTH_KEY_DUPLICATED).
+        if is_posting_enabled:
+            logger.warning(f"Сессия {session_name} помечена как активная, но клиент не найден в памяти. Пропуск временного подключения.")
             return []
 
+        session_string = await Database.get_session_string(user_id, session_name)
+        if not session_string:
+            return []
+
+        # Создаем временный клиент ТОЛЬКО ЕСЛИ пересылка выключена
         client = Client(
-            name=f"temporary_{user_id}_{session_name}",
+            name=f"temp_fetch_{user_id}_{session_name}",
             api_id=API_ID,
             api_hash=API_HASH,
             session_string=session_string,
-            in_memory=True,
+            in_memory=True
         )
-
         try:
             await client.start()
             temporary_client = True
-        except Exception:
-            logger.exception(
-                "Не удалось запустить временный клиент: session=%s",
-                session_name,
-            )
+        except Exception as e:
+            logger.error(f"Не удалось запустить временный клиент для сессии {session_name}: {e}")
             return []
 
     result = []
-
     try:
         async for dialog in client.get_dialogs():
             chat = dialog.chat
-
-            if chat.type not in {
-                ChatType.CHANNEL,
-                ChatType.SUPERGROUP,
-            }:
+            if chat.type not in {ChatType.CHANNEL, ChatType.SUPERGROUP}:
                 continue
 
             if mode == "post":
                 try:
-                    member = await client.get_chat_member(
-                        chat.id,
-                        "me",
-                    )
-
-                    if member.status not in {
-                        ChatMemberStatus.ADMINISTRATOR,
-                        ChatMemberStatus.OWNER,
-                    }:
+                    member = await client.get_chat_member(chat.id, "me")
+                    if member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}:
                         continue
-
                 except Exception:
                     continue
 
-            result.append(
-                {
-                    "id": int(chat.id),
-                    "title": chat.title or str(chat.id),
-                    "username": chat.username,
-                    "type": chat.type,
-                }
-            )
-
-    except Exception:
-        logger.exception(
-            "Ошибка получения каналов: user=%s, session=%s",
-            user_id,
-            session_name,
-        )
-
+            result.append({
+                "id": int(chat.id),
+                "title": chat.title or str(chat.id),
+                "username": chat.username,
+                "type": chat.type,
+            })
+    except Exception as e:
+        logger.error(f"Ошибка при получении диалогов сессии {session_name}: {e}")
     finally:
-        if temporary_client and client.is_connected:
+        if temporary_client and client and client.is_connected:
             try:
                 await client.stop()
             except Exception:
-                logger.exception(
-                    "Ошибка остановки временного клиента: session=%s",
-                    session_name,
-                )
+                pass
 
     return result
 
