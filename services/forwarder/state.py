@@ -10,6 +10,9 @@ running_configs: Dict[Tuple[int, str], dict] = {}
 media_group_buffers: Dict[str, dict] = {}
 client_instances: Dict[Tuple[int, str], Client] = {}
 
+# Защита от параллельного запуска одной и той же сессии
+client_start_locks: Dict[Tuple[int, str], asyncio.Lock] = {}
+
 # Защита от дублей при параллельной работе MessageHandler и поллера
 processed_messages: Set[Tuple[int, int]] = set()
 processing_messages: Set[Tuple[int, int]] = set()
@@ -46,6 +49,14 @@ def has_session_unapplied_changes(
     if running is None:
         return False
     return running != (current_db_config or {})
+
+
+def get_client_start_lock(user_id: int, session_name: str) -> asyncio.Lock:
+    """Возвращает уникальный асинхронный лок для запуска конкретной сессии."""
+    key = (user_id, session_name)
+    if key not in client_start_locks:
+        client_start_locks[key] = asyncio.Lock()
+    return client_start_locks[key]
 
 
 async def claim_message(chat_id: int, message_id: int) -> bool:
