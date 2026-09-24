@@ -4,17 +4,17 @@
   "console_logging": false,
   "file_logging": true,
   "telegram_log_chat_id": -1004315532241,
-  "file_cleanup_period": "3_days",
-  "события": {
+  "file_cleanup_period": "1_week",
+  "events": {
     "new_user": true,
     "session_added": true,
     "session_removed": true,
     "forward_success": true,
-    "forward_filtered": true,
+    "forward_filtered": false,
     "forward_error": true,
     "forwarding_enabled": true,
     "forwarding_disabled": true,
     "bot_error": true,
-    "другое": правда
+    "other": true
   }
 }

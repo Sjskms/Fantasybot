@@ -5,10 +5,14 @@ from aiogram import Bot, Dispatcher
 
 from config import TOKEN, FERNET_KEY
 from database import Database
-from handlers import admin, user, session_handler, account_login
+from handlers import admin, user, account_login
 from middlewares.auth import AuthMiddleware
 from services.scheduler import start_scheduler
 from services.logging_service import set_logging_bot_instance, load_global_logging_config, log_event
+
+from handlers.session import router as session_router
+
+
 
 from services.forwarder.supervisor import restore_active_forwarders
 
@@ -45,7 +49,7 @@ async def main():
     # 6. Регистрация роутеров
     dp.include_router(admin.router)
     dp.include_router(user.router)
-    dp.include_router(session_handler.router) 
+    dp.include_router(session_router)
     dp.include_router(account_login.router) 
     logging.info("Зарегистрированы хендлеры.")
     
