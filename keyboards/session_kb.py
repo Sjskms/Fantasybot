@@ -324,3 +324,50 @@ def get_logging_settings_keyboard(session_name: str, log_config: dict) -> Inline
         [InlineKeyboardButton(text="◀️ Назад к сессии", callback_data=f"session_config_{session_name}")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    
+    
+# Добавьте это в файл keyboards/session_kb.py
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+def get_session_stats_keyboard(session_name: str) -> InlineKeyboardMarkup:
+    """Клавиатура главного экрана статистики сессии."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Подробная статистика", callback_data=f"session_stats_detailed_{session_name}")],
+        [InlineKeyboardButton(text="◀️ Назад к сессии", callback_data=f"manage_session_{session_name}")]
+    ])
+
+
+def get_session_detailed_stats_keyboard(
+    session_name: str, 
+    current_page: int = 1, 
+    total_pages: int = 1
+) -> InlineKeyboardMarkup:
+    """Клавиатура подробной статистики с поддержкой пагинации страниц."""
+    keyboard = []
+
+    # Кнопки пагинации (если страниц больше одной)
+    if total_pages > 1:
+        nav_buttons = []
+        if current_page > 1:
+            nav_buttons.append(
+                InlineKeyboardButton(text="⬅️ Назад", callback_data=f"statspage_{session_name}_{current_page - 1}")
+            )
+        
+        nav_buttons.append(
+            InlineKeyboardButton(text=f"📄 {current_page}/{total_pages}", callback_data="noop")
+        )
+        
+        if current_page < total_pages:
+            nav_buttons.append(
+                InlineKeyboardButton(text="Вперед ➡️", callback_data=f"statspage_{session_name}_{current_page + 1}")
+            )
+        keyboard.append(nav_buttons)
+
+    # Кнопка возврата к общей статистике сессии
+    keyboard.append([
+        InlineKeyboardButton(text="◀️ Назад к статистике", callback_data=f"session_stats_{session_name}")
+    ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)    
