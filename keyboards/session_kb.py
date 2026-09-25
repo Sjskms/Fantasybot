@@ -3,6 +3,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from typing import Any, Dict, List, Set
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from urllib.parse import quote, unquote
 
 from services.forwarder.engine import (
    calculate_session_stats,
@@ -20,8 +21,7 @@ import urllib.parse
 import urllib.parse
 
 def encode_value(value: str) -> str:
-    """Безопасно кодирует строку для использования в callback_data"""
-    return urllib.parse.quote(str(value))
+    return quote(str(value), safe="")
     
     
     
