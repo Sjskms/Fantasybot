@@ -148,6 +148,12 @@ def get_session_management_keyboard(
             ],
             [
                 InlineKeyboardButton(
+                    text="⚙️ Общие фильтры для всех",
+                    callback_data=f"g_filt_{session_name}",  # 👈 Сократили префикс
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="✏️ Текст и ссылки (HTML)",
                     callback_data=f"text_transform_{session_name}",
                 )
@@ -166,19 +172,16 @@ def get_session_management_keyboard(
             ],
             [
                 InlineKeyboardButton(
-                  text="📊 Статистика",
-                   callback_data=f"session_stats_{session_name}"),
-             ],
-             [
+                    text="📊 Статистика",
+                    callback_data=f"session_stats_{session_name}",
+                )
+            ],
+            [
                 InlineKeyboardButton(
-                text="📁 Экспорт/Импорт Config", 
-                callback_data=f"config_sync_{session_name}"),
-             ],
-             [
-             InlineKeyboardButton(
-             text="⚙️ Настроить общие фильтры для всех",
-              callback_data=f"global_filters_menu_{encode_value(session_name)}"),
-              ],
+                    text="📁 Экспорт/Импорт Config", 
+                    callback_data=f"session_config_sync_{session_name}",
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text="❌ Удалить сессию",
