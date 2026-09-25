@@ -142,42 +142,50 @@ from services.forwarder.state import client_instances
 async def fetch_available_channels(user_id: int, session_name: str, mode: str) -> list[dict]:
     task_key = (user_id, session_name)
     
-    # 1. Сначала ищем среди уже запущенных активных клиентов
+    # 1. Бескомпромиссно ищем уже работающий клиент в фоновых задачах
     client = client_instances.get(task_key)
     temporary_client = False
 
-    # 2. Если активного клиента нет, проверяем статус в базе данных
+    # 2. Если клиент не найден в памяти или отключен
     if client is None or not client.is_connected:
+        # Проверяем, включен ли постинг в БД
         is_posting_enabled = await Database.get_session_posting_status(user_id, session_name)
         
-        # ВНИМАНИЕ: Если пересылка включена, клиент ТАК ИЛИ ИНАЧЕ работает в фоне. 
-        # Если клиент не найден в памяти, но пересылка включена — это рассинхрон. 
-        # Пытаться запускать временный клиент опасно (будет AUTH_KEY_DUPLICATED).
         if is_posting_enabled:
-            logger.warning(f"Сессия {session_name} помечена как активная, но клиент не найден в памяти. Пропуск временного подключения.")
-            return []
+            # Если пересылка в базе ВКЛЮЧЕНА, значит клиент ОБЯЗАН где-то работать. 
+            # Чтобы не вызвать AUTH_KEY_DUPLICATED, мы НЕ создаем временный клиент, 
+            # а возвращаем пустой список или ищем во всех активных клиентах.
+            for (u_id, s_name), active_app in client_instances.items():
+                if u_id == user_id and s_name == session_name and active_app.is_connected:
+                    client = active_app
+                    break
+            
+            if client is None or not client.is_connected:
+                logger.warning(f"Сессия {session_name} активна, но живой клиент не найден в памяти. Получение каналов пропущено.")
+                return []
+        else:
+            # Если пересылка ВЫКЛЮЧЕНА, безопасно создаем временный клиент для чтения каналов
+            session_string = await Database.get_session_string(user_id, session_name)
+            if not session_string:
+                return []
 
-        session_string = await Database.get_session_string(user_id, session_name)
-        if not session_string:
-            return []
-
-        # Создаем временный клиент ТОЛЬКО ЕСЛИ пересылка выключена
-        client = Client(
-            name=f"temp_fetch_{user_id}_{session_name}",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            session_string=session_string,
-            in_memory=True
-        )
-        try:
-            await client.start()
-            temporary_client = True
-        except Exception as e:
-            logger.error(f"Не удалось запустить временный клиент для сессии {session_name}: {e}")
-            return []
+            client = Client(
+                name=f"temp_fetch_{user_id}_{session_name}",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                session_string=session_string,
+                in_memory=True
+            )
+            try:
+                await client.start()
+                temporary_client = True
+            except Exception as e:
+                logger.error(f"Не удалось запустить временный клиент для сессии {session_name}: {e}")
+                return []
 
     result = []
     try:
+        # Получаем диалоги через найденный живой или временный клиент
         async for dialog in client.get_dialogs():
             chat = dialog.chat
             if chat.type not in {ChatType.CHANNEL, ChatType.SUPERGROUP}:
@@ -200,6 +208,7 @@ async def fetch_available_channels(user_id: int, session_name: str, mode: str) -
     except Exception as e:
         logger.error(f"Ошибка при получении диалогов сессии {session_name}: {e}")
     finally:
+        # Останавливаем временный клиент ТОЛЬКО если мы его сами создавали
         if temporary_client and client and client.is_connected:
             try:
                 await client.stop()
