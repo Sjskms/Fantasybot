@@ -161,8 +161,13 @@ def get_session_management_keyboard(
              [
                 InlineKeyboardButton(
                 text="📁 Экспорт/Импорт Config", 
-                callback_data=f"config_sync_{session_name}")
+                callback_data=f"config_sync_{session_name}"),
              ],
+             [
+             InlineKeyboardButton(
+             text="⚙️ Настроить общие фильтры для всех",
+              callback_data=f"global_filters_menu_{encode_value(session_name)}"),
+              ],
             [
                 InlineKeyboardButton(
                     text="❌ Удалить сессию",
