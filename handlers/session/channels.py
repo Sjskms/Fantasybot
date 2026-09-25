@@ -535,3 +535,152 @@ async def process_limit_input(message: Message, state: FSMContext):
 @router.callback_query(F.data == "ignore_btn")
 async def ignore_button_handler(callback: CallbackQuery):
     await callback.answer()
+    
+    
+# --- ГЛОБАЛЬНАЯ НАСТРОЙКА ФИЛЬТРОВ ДЛЯ ВСЕХ КАНАЛОВ ЭКСПОРТА ---
+
+@router.callback_query(F.data.startswith("global_filters_menu_"))
+async def open_global_filters_menu(callback: CallbackQuery, state: FSMContext):
+    encoded_name = callback.data.removeprefix("global_filters_menu_")
+    session_name = decode_value(encoded_name)
+    user_id = callback.from_user.id
+
+    await state.update_data(current_session=session_name, current_mode="export")
+
+    # Берем временные глобальные фильтры из стейта или дефолтные
+    state_data = await state.get_data()
+    global_filters = state_data.get("temp_global_filters")
+    
+    if not global_filters:
+        session_configs = await Database.get_session_configs(user_id, session_name) or {}
+        # Пробуем взять из первого попавшегося канала экспорта или ставим дефолтные
+        channels = session_configs.get("channels", {})
+        global_filters = None
+        for ch_data in channels.values():
+            exp_mode = ch_data.get("modes", {}).get("export", {})
+            if exp_mode.get("filters"):
+                global_filters = copy.deepcopy(exp_mode.get("filters"))
+                break
+        if not global_filters:
+            global_filters = get_default_filters()
+        await state.update_data(temp_global_filters=global_filters)
+
+    keyboard = _build_global_filters_keyboard(session_name, global_filters)
+    
+    text = (
+        f"🌐 <b>Глобальные фильтры для всех каналов экспорта</b>\n"
+        f"Сессия: <code>{escape(session_name)}</code>\n\n"
+        "Настройте типы контента и лимиты ниже. После нажатия <b>«💾 Применить ко всем каналам»</b> "
+        "эти настройки запишутся во все активные каналы экспорта этой сессии:"
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+def _build_global_filters_keyboard(session_name: str, filters: dict) -> InlineKeyboardMarkup:
+    rows = []
+    for f_key, f_title in CONTENT_TYPES.items():
+        f_item = filters.get(f_key, {"enabled": True, "min": 0, "max": 999999})
+        is_enabled = f_item.get("enabled", True) if isinstance(f_item, dict) else bool(f_item)
+        icon = "✅" if is_enabled else "❌"
+
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{f_title}: {icon}",
+                callback_data=f"g_toggle_f_{f_key}"
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton(
+            text="💾 Применить ко всем каналам экспорта",
+            callback_data=f"g_apply_filters:{encode_value(session_name)}"
+        )
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            text="◀️ Назад к категориям",
+            callback_data=f"session_config2_{encode_value(session_name)}"
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("g_toggle_f_"))
+async def toggle_global_filter(callback: CallbackQuery, state: FSMContext):
+    filter_key = callback.data.removeprefix("g_toggle_f_")
+    state_data = await state.get_data()
+    session_name = state_data.get("current_session")
+    filters = state_data.get("temp_global_filters", {})
+
+    f_item = filters.get(filter_key, {"enabled": True, "min": 0, "max": 999999})
+    if isinstance(f_item, dict):
+        f_item["enabled"] = not f_item.get("enabled", True)
+    else:
+        filters[filter_key] = {"enabled": not bool(f_item), "min": 0, "max": 999999}
+
+    await state.update_data(temp_global_filters=filters)
+    
+    keyboard = _build_global_filters_keyboard(session_name, filters)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+    except TelegramBadRequest:
+        pass
+    await callback.answer("Статус фильтра изменен")
+
+
+@router.callback_query(F.data.startswith("g_apply_filters:"))
+async def apply_global_filters_to_all(callback: CallbackQuery, state: FSMContext):
+    _, encoded_name = callback.data.split(":", 1)
+    session_name = decode_value(encoded_name)
+    user_id = callback.from_user.id
+
+    state_data = await state.get_data()
+    filters_to_apply = state_data.get("temp_global_filters")
+
+    if not filters_to_apply:
+        return await callback.answer("⚠️ Ошибка: фильтры не найдены в памяти.", show_alert=True)
+
+    session_configs = await Database.get_session_configs(user_id, session_name) or {}
+    channels = session_configs.setdefault("channels", {})
+
+    updated_count = 0
+    for ch_id_str, ch_data in channels.items():
+        if not isinstance(ch_data, dict):
+            continue
+        modes = ch_data.setdefault("modes", {})
+        export_mode = modes.get("export")
+        
+        # Применяем фильтры строго к тем каналам, где включен экспорт
+        if isinstance(export_mode, dict) and export_mode.get("enabled", False):
+            export_mode["filters"] = copy.deepcopy(filters_to_apply)
+            updated_count += 1
+
+    # Сохраняем в базу данных
+    await Database.update_session_configs(user_id, session_name, session_configs)
+    await update_live_config(user_id, session_name)
+    
+    # Перезапускаем сессию для применения изменений
+    from services.forwarder.supervisor import restart_session_gracefully
+    from config import API_ID, API_HASH
+    await restart_session_gracefully(user_id, session_name, API_ID, API_HASH)
+
+    await callback.answer(f"✅ Фильтры успешно применены к {updated_count} каналам экспорта!", show_alert=True)
+    
+    # Возвращаем в меню категорий
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⚙️ К выбору каналов", callback_data=f"session_config2_{encode_value(session_name)}")],
+            [InlineKeyboardButton(text="◀️ В меню сессии", callback_data=f"select_session_{session_name}")]
+        ]
+    )
+    await callback.message.edit_text(
+        f"✅ <b>Глобальные фильтры успешно применены!</b>\n"
+        f"Настройки записаны для <b>{updated_count}</b> каналов экспорта сессии <code>{escape(session_name)}</code>.",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )    
