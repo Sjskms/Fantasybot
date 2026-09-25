@@ -158,6 +158,11 @@ def get_session_management_keyboard(
                   text="📊 Статистика",
                    callback_data=f"session_stats_{session_name}"),
              ],
+             [
+                InlineKeyboardButton(
+                text="📁 Экспорт/Импорт Config", 
+                callback_data=f"config_sync_{session_name}")
+             ],
             [
                 InlineKeyboardButton(
                     text="❌ Удалить сессию",
