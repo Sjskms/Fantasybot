@@ -539,21 +539,18 @@ async def ignore_button_handler(callback: CallbackQuery):
     
 # --- ГЛОБАЛЬНАЯ НАСТРОЙКА ФИЛЬТРОВ ДЛЯ ВСЕХ КАНАЛОВ ЭКСПОРТА ---
 
-@router.callback_query(F.data.startswith("global_filters_menu_"))
+@router.callback_query(F.data.startswith("g_filt_"))
 async def open_global_filters_menu(callback: CallbackQuery, state: FSMContext):
-    encoded_name = callback.data.removeprefix("global_filters_menu_")
-    session_name = decode_value(encoded_name)
+    session_name = callback.data.removeprefix("g_filt_")
     user_id = callback.from_user.id
 
     await state.update_data(current_session=session_name, current_mode="export")
 
-    # Берем временные глобальные фильтры из стейта или дефолтные
     state_data = await state.get_data()
     global_filters = state_data.get("temp_global_filters")
     
     if not global_filters:
         session_configs = await Database.get_session_configs(user_id, session_name) or {}
-        # Пробуем взять из первого попавшегося канала экспорта или ставим дефолтные
         channels = session_configs.get("channels", {})
         global_filters = None
         for ch_data in channels.values():
@@ -570,8 +567,8 @@ async def open_global_filters_menu(callback: CallbackQuery, state: FSMContext):
     text = (
         f"🌐 <b>Глобальные фильтры для всех каналов экспорта</b>\n"
         f"Сессия: <code>{escape(session_name)}</code>\n\n"
-        "Настройте типы контента и лимиты ниже. После нажатия <b>«💾 Применить ко всем каналам»</b> "
-        "эти настройки запишутся во все активные каналы экспорта этой сессии:"
+        "Настройте типы контента ниже. После нажатия <b>«💾 Применить ко всем каналам»</b> "
+        "эти настройки запишутся во все каналы экспорта этой сессии:"
     )
 
     try:
