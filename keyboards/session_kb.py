@@ -14,6 +14,17 @@ from services.forwarder.state import (
 from database import Database
 db = Database() 
 
+import urllib.parse
+
+# В самом начале файла keyboards/session_kb.py добавьте:
+import urllib.parse
+
+def encode_value(value: str) -> str:
+    """Безопасно кодирует строку для использования в callback_data"""
+    return urllib.parse.quote(str(value))
+    
+    
+    
 # Кнопка отмены для FSM
 cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="⚙️ Отмена", callback_data="cans")]
