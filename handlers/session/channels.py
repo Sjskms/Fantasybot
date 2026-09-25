@@ -539,6 +539,35 @@ async def ignore_button_handler(callback: CallbackQuery):
     
 # --- ГЛОБАЛЬНАЯ НАСТРОЙКА ФИЛЬТРОВ ДЛЯ ВСЕХ КАНАЛОВ ЭКСПОРТА ---
 
+def _build_global_filters_keyboard(session_name: str, filters: dict) -> InlineKeyboardMarkup:
+    rows = []
+    for f_key, f_title in CONTENT_TYPES.items():
+        f_item = filters.get(f_key, {"enabled": True, "min": 0, "max": 999999})
+        is_enabled = f_item.get("enabled", True) if isinstance(f_item, dict) else bool(f_item)
+        icon = "✅" if is_enabled else "❌"
+
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{f_title}: {icon}",
+                callback_data=f"g_toggle_f_{f_key}"
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton(
+            text="💾 Применить ко всем каналам экспорта",
+            callback_data=f"g_apply:{session_name}"  # 👈 Без encode_value
+        )
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            text="◀️ Назад к настройкам каналов",
+            callback_data=f"session_config2_{session_name}"  # 👈 Без encode_value
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 @router.callback_query(F.data.startswith("g_filt_"))
 async def open_global_filters_menu(callback: CallbackQuery, state: FSMContext):
     session_name = callback.data.removeprefix("g_filt_")
@@ -573,38 +602,11 @@ async def open_global_filters_menu(callback: CallbackQuery, state: FSMContext):
 
     try:
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    except TelegramBadRequest:
-        pass
-    await callback.answer()
-
-
-def _build_global_filters_keyboard(session_name: str, filters: dict) -> InlineKeyboardMarkup:
-    rows = []
-    for f_key, f_title in CONTENT_TYPES.items():
-        f_item = filters.get(f_key, {"enabled": True, "min": 0, "max": 999999})
-        is_enabled = f_item.get("enabled", True) if isinstance(f_item, dict) else bool(f_item)
-        icon = "✅" if is_enabled else "❌"
-
-        rows.append([
-            InlineKeyboardButton(
-                text=f"{f_title}: {icon}",
-                callback_data=f"g_toggle_f_{f_key}"
-            )
-        ])
-
-    rows.append([
-        InlineKeyboardButton(
-            text="💾 Применить ко всем каналам экспорта",
-            callback_data=f"g_apply_filters:{encode_value(session_name)}"
-        )
-    ])
-    rows.append([
-        InlineKeyboardButton(
-            text="◀️ Назад к категориям",
-            callback_data=f"session_config2_{encode_value(session_name)}"
-        )
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    except TelegramBadRequest as e:
+        logger.error("Ошибка отрисовки меню глобальных фильтров: %s", e)
+        await callback.answer(f"⚠️ Ошибка меню: {e}", show_alert=True)
+    else:
+        await callback.answer()
 
 
 @router.callback_query(F.data.startswith("g_toggle_f_"))
@@ -630,10 +632,9 @@ async def toggle_global_filter(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Статус фильтра изменен")
 
 
-@router.callback_query(F.data.startswith("g_apply_filters:"))
+@router.callback_query(F.data.startswith("g_apply:"))
 async def apply_global_filters_to_all(callback: CallbackQuery, state: FSMContext):
-    _, encoded_name = callback.data.split(":", 1)
-    session_name = decode_value(encoded_name)
+    session_name = callback.data.removeprefix("g_apply:")
     user_id = callback.from_user.id
 
     state_data = await state.get_data()
@@ -657,21 +658,18 @@ async def apply_global_filters_to_all(callback: CallbackQuery, state: FSMContext
             export_mode["filters"] = copy.deepcopy(filters_to_apply)
             updated_count += 1
 
-    # Сохраняем в базу данных
     await Database.update_session_configs(user_id, session_name, session_configs)
     await update_live_config(user_id, session_name)
     
-    # Перезапускаем сессию для применения изменений
     from services.forwarder.supervisor import restart_session_gracefully
     from config import API_ID, API_HASH
     await restart_session_gracefully(user_id, session_name, API_ID, API_HASH)
 
-    await callback.answer(f"✅ Фильтры успешно применены к {updated_count} каналам экспорта!", show_alert=True)
+    await callback.answer(f"✅ Применено к {updated_count} каналам!", show_alert=True)
     
-    # Возвращаем в меню категорий
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⚙️ К выбору каналов", callback_data=f"session_config2_{encode_value(session_name)}")],
+            [InlineKeyboardButton(text="⚙️ К настройкам каналов", callback_data=f"session_config2_{session_name}")],
             [InlineKeyboardButton(text="◀️ В меню сессии", callback_data=f"select_session_{session_name}")]
         ]
     )
@@ -680,4 +678,4 @@ async def apply_global_filters_to_all(callback: CallbackQuery, state: FSMContext
         f"Настройки записаны для <b>{updated_count}</b> каналов экспорта сессии <code>{escape(session_name)}</code>.",
         reply_markup=kb,
         parse_mode="HTML"
-    )    
+    )
