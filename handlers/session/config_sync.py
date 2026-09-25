@@ -1,6 +1,7 @@
 # handlers/session/config_sync.py
 import json
 import logging
+import os
 from html import escape
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -8,6 +9,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, Message, InlineKeyboardButton, InlineKeyboardMarkup
 
 from database import Database
+from services.forwarder.supervisor import update_live_config, restart_session_gracefully
+from services.forwarder.state import loaded_configs
+from config import API_ID, API_HASH
 from .channels import decode_value, encode_value
 
 router = Router()
@@ -18,7 +22,7 @@ class ConfigSyncStates(StatesGroup):
     waiting_for_config_file = State()
 
 
-def get_config_keyboard(session_name: str) -> InlineKeyboardMarkup:
+def get_config_sync_keyboard(session_name: str) -> InlineKeyboardMarkup:
     """Клавиатура для меню выгрузки/загрузки конфигурации сессии."""
     encoded_name = encode_value(session_name)
     return InlineKeyboardMarkup(
@@ -44,7 +48,7 @@ async def open_config_sync_menu(callback: CallbackQuery, state: FSMContext):
     )
     
     try:
-        await callback.message.edit_text(text, reply_markup=get_config_keyboard(session_name), parse_mode="HTML")
+        await callback.message.edit_text(text, reply_markup=get_config_sync_keyboard(session_name), parse_mode="HTML")
     except Exception:
         pass
     await callback.answer()
@@ -58,11 +62,14 @@ async def export_session_config(callback: CallbackQuery):
     user_id = callback.from_user.id
 
     try:
+        # Принудительно подтягиваем актуальные данные в кэш памяти из базы данных
+        await update_live_config(user_id, session_name)
+        
+        # Получаем конфиг напрямую из базы (или через свежий кэш)
         configs = await Database.get_session_configs(user_id, session_name)
         if not configs:
-            configs = {}
+            configs = loaded_configs.get((user_id, session_name), {})
 
-        # Создаем красивый JSON-файл в памяти/на диске
         file_name = f"config_{session_name}.json"
         file_content = json.dumps(configs, ensure_ascii=False, indent=2)
         
@@ -70,15 +77,15 @@ async def export_session_config(callback: CallbackQuery):
             f.write(file_content)
 
         document = FSInputFile(file_name)
+        file_size_kb = round(os.path.getsize(file_name) / 1024, 2)
+
         await callback.message.answer_document(
             document=document,
-            caption=f"📄 <b>Конфигурация сессии:</b> <code>{escape(session_name)}</code>",
+            caption=f"📄 <b>Конфигурация сессии:</b> <code>{escape(session_name)}</code>\n📊 Размер: <code>{file_size_kb} KB</code>",
             parse_mode="HTML"
         )
         await callback.answer("Файл конфигурации успешно выгружен!")
         
-        # Удаляем временный файл
-        import os
         if os.path.exists(file_name):
             os.remove(file_name)
 
@@ -120,32 +127,31 @@ async def process_session_config_upload(message: Message, state: FSMContext):
 
     raw_text = None
 
-        # Если пользователь прислал документ
     if message.document:
         try:
             file = await message.bot.get_file(message.document.file_id)
-            # Скачиваем файл в буфер (BytesIO)
             file_io = await message.bot.download_file(file.file_path)
-            # Читаем байты из буфера и декодируем в текст
             raw_text = file_io.read().decode("utf-8")
         except Exception as e:
             return await message.answer(f"⚠️ Не удалось прочитать прикрепленный файл: {e}")
-    
-    # Если пользователь прислал JSON текстом
     elif message.text:
         raw_text = message.text
 
     if not raw_text:
-        return await message.answer("⚠️ Пожалуйста, отправьте файл <code>config.json</code> или текст конфигурации.")
+        return await message.answer("⚠️ Пожалуйста, отправьте файл <code>config.json</code> или текст конфигурации.", parse_mode="HTML")
 
     try:
-        # Парсим JSON
         parsed_config = json.loads(raw_text)
         if not isinstance(parsed_config, dict):
             raise ValueError("Содержимое JSON должно быть словарем (dict).")
 
-        # Сохраняем в базу данных
+        # 1. Сохраняем в базу данных
         await Database.update_session_configs(user_id, session_name, parsed_config)
+
+        # 2. Обновляем память и перезапускаем воркхук сессии
+        await update_live_config(user_id, session_name)
+        await restart_session_gracefully(user_id, session_name, API_ID, API_HASH)
+
         await state.clear()
 
         kb = InlineKeyboardMarkup(
@@ -154,9 +160,12 @@ async def process_session_config_upload(message: Message, state: FSMContext):
             ]
         )
 
+        file_size_kb = round(len(raw_text.encode('utf-8')) / 1024, 2)
+
         await message.answer(
-            f"✅ <b>Конфигурация успешно импортирована в базу данных!</b>\n"
-            f"Сессия: <code>{escape(session_name)}</code>",
+            f"✅ <b>Конфигурация успешно импортирована и применена!</b>\n"
+            f"Сессия: <code>{escape(session_name)}</code>\n\n"
+            f"📊 Размер файла: <b>{file_size_kb} KB</b>",
             reply_markup=kb,
             parse_mode="HTML"
         )

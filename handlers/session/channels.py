@@ -60,6 +60,7 @@ def make_config_callback(mode: str, chat_id: int) -> str:
 def build_channels_keyboard(
     channels: list[dict],
     selected_ids: set[int],
+    initial_selected_ids: set[int],
     mode: str,
     current_page: int,
 ) -> InlineKeyboardMarkup:
@@ -86,8 +87,8 @@ def build_channels_keyboard(
             )
         ]
 
-        # Кнопка настройки появляется на той же строке СТРОГО если канал выбран
-        if selected:
+        # 1. Кнопка настройки появляется ТОЛЬКО если канал выбран И это режим экспорта (mode == "export")
+        if selected and mode == "export":
             channel_row.append(
                 InlineKeyboardButton(
                     text="⚙️ Настроить",
@@ -119,13 +120,17 @@ def build_channels_keyboard(
             )
         rows.append(navigation)
 
-    # Служебные кнопки внизу
-    rows.append([
-        InlineKeyboardButton(
-            text="💾 Сохранить изменения",
-            callback_data=f"ch:save:{mode}",
-        )
-    ])
+    # 2. Кнопка «Сохранить изменения» появляется СТРОГО если текущий выбор отличается от сохраненного в базе
+    has_changes = selected_ids != initial_selected_ids
+    if has_changes:
+        rows.append([
+            InlineKeyboardButton(
+                text="💾 Сохранить изменения",
+                callback_data=f"ch:save:{mode}",
+            )
+        ])
+
+    # Кнопка возврата всегда на месте
     rows.append([
         InlineKeyboardButton(
             text="◀️ Назад к категориям",
@@ -243,16 +248,27 @@ async def render_channel_page(callback: CallbackQuery, state: FSMContext, mode: 
         await state.update_data(cached_channels=cached_channels)
 
     configs = await Database.get_session_configs(user_id, session_name) or {}
-    selected_ids = get_selected_channel_ids(configs, mode)
+    selected_ids = state_data.get("selected_channels_ids")
+    
+    if selected_ids is None:
+        selected_ids = get_selected_channel_ids(configs, mode)
+        initial_selected_ids = set(selected_ids) # Запоминаем оригинал из базы
+        await state.update_data(
+            selected_channels_ids=selected_ids,
+            initial_selected_ids=initial_selected_ids
+        )
+    else:
+        initial_selected_ids = state_data.get("initial_selected_ids", set())
 
-    keyboard = build_channels_keyboard(cached_channels, selected_ids, mode, page)
+    # Генерируем клавиатуру с проверкой изменений
+    keyboard = build_channels_keyboard(cached_channels, selected_ids, initial_selected_ids, mode, page)
     mode_title = "постинга" if mode == "post" else "экспорта"
 
     text = (
         f"📋 <b>Каналы для {mode_title}</b>\n\n"
         f"Сессия: <code>{escape(session_name)}</code>\n"
         f"Всего каналов: <b>{len(cached_channels)}</b>\n\n"
-        "Выберите каналы или нажмите <b>⚙️ Настроить фильтры</b> под нужным каналом:"
+        "Выберите нужные каналы:"
     )
 
     try:
@@ -357,11 +373,22 @@ async def configure_channel(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("ch:save:"))
 async def save_channels_handler(callback: CallbackQuery, state: FSMContext):
+    _, _, mode = callback.data.split(":", 2)
     data = await state.get_data()
     session_name = data.get("current_session")
     user_id = callback.from_user.id
+    
+    selected_ids = data.get("selected_channels_ids", set())
+    
+    # Фиксируем текущий выбор как новый исходный (чтобы кнопка Сохранить пропала после клика)
+    await state.update_data(initial_selected_ids=set(selected_ids))
+    
     if session_name:
         await update_live_config(user_id, session_name)
+        
+    # Перерисовываем страницу, чтобы кнопка «Сохранить» исчезла
+    page = 1 # можете сохранить текущую страницу в стейт при желании
+    await render_channel_page(callback, state, mode, session_name, page)
     await callback.answer("✅ Изменения успешно сохранены!", show_alert=True)
 
 
