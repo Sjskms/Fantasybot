@@ -22,6 +22,7 @@ from services.forwarder.state import client_instances
 from pyrogram import Client
 from pyrogram.enums import ChatMemberStatus, ChatType
 
+
 from keyboards.session_kb import (
     _build_channel_settings_keyboard,
     _build_filter_limits_keyboard,
@@ -264,14 +265,19 @@ async def render_channel_page(callback: CallbackQuery, state: FSMContext, mode: 
             raise
 
 
+
+
 @router.callback_query(F.data.startswith("list_"))
 async def open_channel_list(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_", 2)
     if len(parts) != 3:
         return await callback.answer("Некорректные данные", show_alert=True)
 
-    _, mode, session_name = parts
-    # Сбрасываем старый кэш выбора, но сохраняем имя сессии и режим
+    _, mode, raw_session_name = parts
+    # Декодируем имя сессии, чтобы убрать %D0%A1...
+    session_name = unquote(raw_session_name)
+
+    # Сбрасываем старый кэш выбора, но сохраняем чистое имя сессии и режим
     await state.update_data(
         current_session=session_name,
         current_mode=mode,

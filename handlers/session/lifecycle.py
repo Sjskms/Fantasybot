@@ -37,65 +37,28 @@ logger = logging.getLogger(__name__)
 
 
 @router.callback_query(F.data.startswith("session_config2_"))
-async def config_menu(
-    callback: CallbackQuery,
-    state: FSMContext,
-):
-    encoded_session_name = callback.data.removeprefix(
-        "session_config2_"
-    )
-    session_name = decode_value(encoded_session_name)
+async def config_menu(callback: CallbackQuery, state: FSMContext):
+    session_name = callback.data.removeprefix("session_config2_")
+    await state.update_data(current_session=session_name)
 
-    await state.update_data(
-        current_session=session_name
-    )
-
-    keyboard = InlineKeyboardMarkup(
+    kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📥 Каналы для экспорта",
-                    callback_data=(
-                        f"list_export_"
-                        f"{encode_value(session_name)}"
-                    ),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📤 Каналы для постинга",
-                    callback_data=(
-                        f"list_post_"
-                        f"{encode_value(session_name)}"
-                    ),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="◀️ Назад",
-                    callback_data=(
-                        f"select_session_"
-                        f"{encode_value(session_name)}"
-                    ),
-                )
-            ],
+            [InlineKeyboardButton(text="📥 Каналы для экспорта", callback_data=f"list_export_{session_name}")],
+            [InlineKeyboardButton(text="📤 Каналы для постинга", callback_data=f"list_post_{session_name}")],
+            [InlineKeyboardButton(text="⚙️ Общие фильтры для всех", callback_data=f"g_filt_{session_name}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=f"select_session_{session_name}")],
         ]
     )
-
+    
     try:
         await callback.message.edit_text(
-            (
-                "⚙️ <b>Настройки каналов</b>\n\n"
-                f"Сессия: <code>{escape(session_name)}</code>\n\n"
-                "Выберите категорию:"
-            ),
-            reply_markup=keyboard,
-            parse_mode="HTML",
+            f"⚙️ Выберите категорию каналов для сессии: <code>{escape(session_name)}</code>",
+            reply_markup=kb,
+            parse_mode="HTML"
         )
     except TelegramBadRequest as error:
         if "message is not modified" not in str(error):
             raise
-
     await callback.answer()
     
     
