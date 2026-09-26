@@ -29,6 +29,8 @@ from keyboards.session_kb import (
 from .state import CONTENT_TYPES, FILTER_UNITS, FilterLimitsStates
 from .common import get_default_filters
 
+from services.config_service import get_user_limits
+
 router = Router()
 logger = logging.getLogger(__name__)
 
@@ -297,18 +299,30 @@ async def toggle_channel_handler(callback: CallbackQuery, state: FSMContext):
     _, _, mode, raw_chat_id, page = callback.data.split(":", 4)
     chat_id = int(raw_chat_id)
     page = int(page)
+    user_id = callback.from_user.id
 
     data = await state.get_data()
-    session_name = data.get("current_session")
     selected_ids = set(data.get("selected_channels_ids", set()))
 
-    if chat_id in selected_ids:
-        selected_ids.remove(chat_id)
-        msg_text = "Канал снят ❌"
-    else:
+    # Если пользователь хочет включить канал
+    if chat_id not in selected_ids:
+        limits = await get_user_limits(user_id)
+        max_allowed = limits["max_export_channels"] if mode == "export" else limits["max_post_channels"]
+
+        if len(selected_ids) >= max_allowed:
+            mode_text = "экспорта" if mode == "export" else "постинга"
+            return await callback.answer(
+                f"🚫 Достигнут лимит каналов {mode_text}!\n"
+                f"Максимум для вашего аккаунта: {max_allowed}",
+                show_alert=True
+            )
+
         selected_ids.add(chat_id)
         msg_text = "Канал выбран ✅"
-
+    else:
+        selected_ids.remove(chat_id)
+        msg_text = "Канал снят ❌"
+        
     # Сохраняем состояние только в FSM! В базу запишем по кнопке «Сохранить изменения»
     await state.update_data(selected_channels_ids=selected_ids)
 
