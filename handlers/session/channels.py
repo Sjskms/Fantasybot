@@ -309,6 +309,7 @@ async def toggle_channel_handler(callback: CallbackQuery, state: FSMContext):
 
     data = await state.get_data()
     selected_ids = set(data.get("selected_channels_ids", set()))
+    session_name = data.get("current_session")
 
     # Если пользователь хочет включить канал
     if chat_id not in selected_ids:
