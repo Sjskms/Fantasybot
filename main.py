@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher
 
 from config import TOKEN, FERNET_KEY
 from database import Database
-from handlers import admin, user, account_login
+from handlers import admin, user, account_login,admin_limits
 from middlewares.auth import AuthMiddleware
 from services.scheduler import start_scheduler
 from services.logging_service import set_logging_bot_instance, load_global_logging_config, log_event
@@ -76,6 +76,7 @@ async def main():
     dp.include_router(user.router)
     dp.include_router(session_router)
     dp.include_router(account_login.router) 
+    dp.include_router(admin_limits.router) 
     logging.info("Зарегистрированы хендлеры.")
     
     # 7. Мидлвари

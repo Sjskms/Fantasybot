@@ -1,11 +1,11 @@
 #database.py база данныз
-import aiosqlite
-import datetime 
+import aiosqlite 
+from datetime import date
 from config import FERNET_CRYPTO  # Импортируем готовый объект из конфига
 from cryptography.fernet import Fernet
 import logging
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 # Московское время (UTC+3)
 MSK_TZ = timezone(timedelta(hours=3))
@@ -429,20 +429,21 @@ class Database:
     @staticmethod
     async def get_users_registered_today() -> int:
         """Возвращает количество пользователей, зарегистрированных сегодня."""
-        today_str = datetime.date.today().isoformat()
+        today = date.today()
+        #today_str = datetime.today().date().isoformat()
         async with aiosqlite.connect(Database.DB_NAME) as db:
-            async with db.execute('SELECT COUNT(*) FROM users WHERE substr(registration_date, 1, 10) = ?', (today_str,)) as cursor:
+            async with db.execute('SELECT COUNT(*) FROM users WHERE substr(registration_date, 1, 10) = ?', (today,)) as cursor:
                 row = await cursor.fetchone()
                 return row[0] if row else 0
 
     @staticmethod
     async def get_users_registered_this_week() -> int:
         """Возвращает количество пользователей, зарегистрированных на текущей неделе (с понедельника)."""
-        today = datetime.date.today()
+        today = date.today() 
         # Понедельник текущей недели
-        start_of_week = today - datetime.timedelta(days=today.weekday())
+        start_of_week = today - timedelta(days=today.weekday())
         # Воскресенье текущей недели
-        end_of_week = start_of_week + datetime.timedelta(days=6)
+        end_of_week = start_of_week + timedelta(days=6) 
 
         async with aiosqlite.connect(Database.DB_NAME) as db:
             async with db.execute('SELECT COUNT(*) FROM users WHERE substr(registration_date, 1, 10) BETWEEN ? AND ?', 
@@ -453,13 +454,13 @@ class Database:
     @staticmethod
     async def get_users_registered_this_month() -> int:
         """Возвращает количество пользователей, зарегистрированных в текущем месяце."""
-        today = datetime.date.today()
+        today = date.today()
         start_of_month = today.replace(day=1)
         # Для конца месяца: начало следующего месяца минус один день
         if today.month == 12:
-            end_of_month = today.replace(year=today.year + 1, month=1, day=1) - datetime.timedelta(days=1)
+            end_of_month = today.replace(year=today.year + 1, month=1, day=1) - timedelta(days=1)
         else:
-            end_of_month = today.replace(month=today.month + 1, day=1) - datetime.timedelta(days=1)
+            end_of_month = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
 
         async with aiosqlite.connect(Database.DB_NAME) as db:
             async with db.execute('SELECT COUNT(*) FROM users WHERE substr(registration_date, 1, 10) BETWEEN ? AND ?', 
