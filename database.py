@@ -4,7 +4,24 @@ import datetime
 from config import FERNET_CRYPTO  # Импортируем готовый объект из конфига
 from cryptography.fernet import Fernet
 import logging
+import json
+from datetime import datetime, timedelta, timezone
 
+# Московское время (UTC+3)
+MSK_TZ = timezone(timedelta(hours=3))
+
+def get_msk_now() -> datetime:
+    """Возвращает текущую дату и время по Москве (без микросекунд)."""
+    return datetime.now(MSK_TZ).replace(microsecond=0)
+
+def parse_db_date(date_str: str) -> datetime:
+    """Парсит строку даты из базы данных в объект datetime по Москве."""
+    dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+    return dt.replace(tzinfo=MSK_TZ)
+    
+    
+    
+    
 logger = logging.getLogger(__name__)
 
 import json
@@ -122,8 +139,7 @@ class Database:
 
             await db.commit()
             
-    
-    
+   
     
     
     @staticmethod
@@ -145,6 +161,16 @@ class Database:
             
             
 
+            
+            # Создаем таблицу премиума, если её нет
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS premium (
+                    user_id INTEGER PRIMARY KEY,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL
+                )
+            """)
+            
             # Таблица для администраторов
             await db.execute('''CREATE TABLE IF NOT EXISTS admins (
                           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -535,4 +561,139 @@ class Database:
                 i = 1
                 while f"Сессия {i}" in existing_names:
                     i += 1
-                return i
+                return i	
+                
+                				
+                								
+    
+
+    # =========================================================================
+    # 5 ФУНКЦИЙ ДЛЯ РАБОТЫ С ПРЕМИУМ-СТАТУСОМ
+    # =========================================================================
+
+                								
+    @staticmethod
+    async def is_premium_active(user_id: int) -> bool:
+        """1. Проверяет активен ли Премиум (с авто-удалением, если истек)."""
+        async with aiosqlite.connect(Database.DB_NAME) as db:
+            async with db.execute(
+                "SELECT end_date FROM premium WHERE user_id = ?", (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if not row:
+                return False
+
+            end_date = parse_db_date(row[0])
+            now = get_msk_now()
+
+            if now >= end_date:
+                await db.execute("DELETE FROM premium WHERE user_id = ?", (user_id,))
+                await db.commit()
+                return False
+
+            return True
+
+    @staticmethod
+    async def get_premium_dates(user_id: int) -> tuple[str, str] | None:
+        """2. Возвращает (дата_начала, дата_окончания) в формате ДД.ММ.ГГГГ ЧЧ:ММ."""
+        if not await Database.is_premium_active(user_id):
+            return None
+
+        async with aiosqlite.connect(Database.DB_NAME) as db:
+            async with db.execute(
+                "SELECT start_date, end_date FROM premium WHERE user_id = ?", (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if row:
+                start_dt = parse_db_date(row[0]).strftime("%d.%m.%Y %H:%M")
+                end_dt = parse_db_date(row[1]).strftime("%d.%m.%Y %H:%M")
+                return start_dt, end_dt
+
+            return None
+
+    @staticmethod
+    async def get_premium_remaining_time(user_id: int) -> str | None:
+        """3. Возвращает оставшееся время: 'X дн. Y ч. Z мин.'."""
+        if not await Database.is_premium_active(user_id):
+            return None
+
+        async with aiosqlite.connect(Database.DB_NAME) as db:
+            async with db.execute(
+                "SELECT end_date FROM premium WHERE user_id = ?", (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if not row:
+                return None
+
+            end_date = parse_db_date(row[0])
+            now = get_msk_now()
+            diff = end_date - now
+
+            if diff.total_seconds() <= 0:
+                return None
+
+            days = diff.days
+            hours = diff.seconds // 3600
+            minutes = (diff.seconds % 3600) // 60
+
+            parts = []
+            if days > 0:
+                parts.append(f"{days} дн.")
+            if hours > 0:
+                parts.append(f"{hours} ч.")
+            parts.append(f"{minutes} мин.")
+
+            return " ".join(parts)
+
+    @staticmethod
+    async def add_premium(user_id: int, days: int) -> str:
+        """4. Добавляет или продлевает Премиум на N дней по МСК."""
+        now = get_msk_now()
+        async with aiosqlite.connect(Database.DB_NAME) as db:
+            async with db.execute(
+                "SELECT start_date, end_date FROM premium WHERE user_id = ?", (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if row:
+                current_end = parse_db_date(row[1])
+                base_start = parse_db_date(row[0]) if current_end > now else now
+                base_end = current_end if current_end > now else now
+            else:
+                base_start = now
+                base_end = now
+
+            new_end = base_end + timedelta(days=days)
+            start_str = base_start.strftime("%Y-%m-%d %H:%M:%S")
+            end_str = new_end.strftime("%Y-%m-%d %H:%M:%S")
+
+            await db.execute("""
+                INSERT INTO premium (user_id, start_date, end_date)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    start_date = excluded.start_date,
+                    end_date = excluded.end_date
+            """, (user_id, start_str, end_str))
+            await db.commit()
+
+            return new_end.strftime("%d.%m.%Y %H:%M")
+
+    @staticmethod
+    async def remove_premium(user_id: int) -> bool:
+        """5. Удаляет Премиум у пользователя."""
+        async with aiosqlite.connect(Database.DB_NAME) as db:
+            cursor = await db.execute("DELETE FROM premium WHERE user_id = ?", (user_id,))
+            await db.commit()
+            return cursor.rowcount > 0
+
+    @staticmethod
+    async def cleanup_expired_premiums() -> int:
+        """Служебный метод: удаляет все просроченные подписки."""
+        now_str = get_msk_now().strftime("%Y-%m-%d %H:%M:%S")
+        async with aiosqlite.connect(Database.DB_NAME) as db:
+            cursor = await db.execute("DELETE FROM premium WHERE end_date <= ?", (now_str,))
+            await db.commit()
+            return cursor.rowcount

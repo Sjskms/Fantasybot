@@ -15,7 +15,32 @@ from handlers.session import router as session_router
 
 
 from services.forwarder.supervisor import restore_active_forwarders
+# main.py
+import asyncio
+from database import Database
 
+async def periodic_premium_cleanup():
+    """Фоновая задача: проверяет и очищает истекшие подписки каждые 30 минут."""
+    while True:
+        try:
+            removed_count = await Database.cleanup_expired_premiums()
+            if removed_count > 0:
+                logging.info(f"🧹 Фоновая очистка: удалено {removed_count} истекших Премиум-подписок.")
+        except Exception as e:
+            logging.error(f"Ошибка при очистке Премиумов: {e}")
+        
+        # Пауза 30 минут (1800 секунд)
+        await asyncio.sleep(1800)
+
+async def main():
+   
+    # Запускаем фоновую очистку премиума в asyncio-задаче
+    
+
+    # Запуск polling бота...
+    await dp.start_polling(bot)
+    
+    
 
 async def main():
     logging.basicConfig(
@@ -61,8 +86,11 @@ async def main():
         "other",
         "✅ <b>Бот успешно запущен и готов к работе!</b>"
     )
+    
+    #9
+    asyncio.create_task(periodic_premium_cleanup())
 
-    # 9. Запуск поллинга
+    # 10. Запуск поллинга
     await bot.delete_webhook(drop_pending_updates=False)    
     logging.info("Запускаем опрос бота...")
     await dp.start_polling(bot)
