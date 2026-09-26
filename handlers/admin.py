@@ -63,7 +63,22 @@ async def cmd_admin_menu(message: Message, state: FSMContext):
         parse_mode="HTML",
     )
 
+# Пример: /grant_premium 7916504148 30 (выдать на 30 дней)
+@router.message(Command("grant_premium"),IsAdmin())
+async def admin_grant_premium(message: Message):
+    
+    parts = message.text.split()
+    if len(parts) < 3:
+        return await message.answer("Использование: `/grant_premium <user_id> <дни>`", parse_mode="Markdown")
 
+    target_user_id = int(parts[1])
+    days = int(parts[2])
+
+    end_date_str = await Database.add_premium(target_user_id, days)
+    await message.answer(f"✅ Премиум для <code>{target_user_id}</code> успешно выдан до <b>{end_date_str}</b>!", parse_mode="HTML")
+    
+    
+    
 # --- КЛАВИАТУРЫ ДЛЯ МЕНЮ ЛОГИРОВАНИЯ ---
 
 EVENT_TITLES = {

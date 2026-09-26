@@ -5,6 +5,7 @@ from aiogram import F, Router, types
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
+from services.config_service import get_user_limits
 
 from database import Database
 from services.logging_service import log_event
@@ -98,9 +99,12 @@ async def main_menu_callback_handler(callback_query: CallbackQuery):
         await log_event("bot_error", f"❌ Ошибка в колбэке main_menu: {e}", user_id=callback_query.from_user.id)
 
 
+
+
+
 @router.callback_query(F.data == "profile")
 async def profile_callback_handler(callback_query: CallbackQuery):
-    """Раздел Профиль."""
+    """Раздел Профиль с расширенной статистикой лимитов сессий и каналов."""
     try:
         user_id = callback_query.from_user.id
         user_data = await Database.get_user(user_id)
@@ -119,10 +123,41 @@ async def profile_callback_handler(callback_query: CallbackQuery):
             else:
                 formatted_reg_date = "Не указана"
 
-            # Получаем сессии и форматируем список
+            # 1. Получаем актуальные лимиты пользователя (Free или Premium)
+            limits = await get_user_limits(user_id)
+            max_sessions = limits["max_sessions"]
+            max_export = limits["max_export_channels"]
+            max_post = limits["max_post_channels"]
+
+            # 2. Проверяем Премиум-статус
+            is_premium = await Database.is_premium_active(user_id)
+            if is_premium:
+                dates = await Database.get_premium_dates(user_id)
+                remaining = await Database.get_premium_remaining_time(user_id)
+                end_date = dates[1] if dates else "—"
+                remaining_info = f" (осталось {remaining})" if remaining else ""
+                premium_text = f"Активен до {end_date}{remaining_info}"
+            else:
+                premium_text = "отсутствует"
+
+            # 3. Получаем список всех сессий пользователя
             sessions = await Database.get_user_sessions_list(user_id)
+            total_sessions = len(sessions) if sessions else 0
+
+            # 4. Формируем подробный список по каждой сессии
             if sessions:
-                session_lines = [f"  ▫️ <code>{row[0]}</code>" for row in sessions]
+                session_lines = []
+                for row in sessions:
+                    session_name = row[0]
+                    # Считаем количество выбранных каналов для экспорта и постинга
+                    export_count = await Database.count_selected_channels(user_id, session_name, "export")
+                    post_count = await Database.count_selected_channels(user_id, session_name, "post")
+
+                    session_lines.append(
+                        f"  ▫️ <code>{session_name}</code>\n"
+                        f"      ├ 📤 Экспорт: <b>{export_count}/{max_export}</b>\n"
+                        f"      └ 📥 Постинг: <b>{post_count}/{max_post}</b>"
+                    )
                 sessions_text = "\n".join(session_lines)
             else:
                 sessions_text = "  <i>Сессий пока нет</i>"
@@ -132,8 +167,10 @@ async def profile_callback_handler(callback_query: CallbackQuery):
                 f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
                 f"📛 <b>Имя:</b> {name}\n"
                 f"🌐 <b>Username:</b> @{username if username else 'не задан'}\n"
-                f"📅 <b>Регистрация:</b> {formatted_reg_date}\n\n"
-                f"📱 <b>Подключенные сессии:</b>\n{sessions_text}"
+                f"📅 <b>Регистрация:</b> {formatted_reg_date}\n"
+                f"⭐ <b>Премиум статус:</b> {premium_text}\n\n"
+                f"📱 <b>Подключенные сессии ({total_sessions}/{max_sessions}):</b>\n"
+                f"{sessions_text}"
             )
         else:
             profile_text = "❌ Не удалось найти данные профиля. Нажмите /start."
@@ -150,6 +187,8 @@ async def profile_callback_handler(callback_query: CallbackQuery):
         await callback_query.answer()
     except Exception as e:
         await log_event("bot_error", f"❌ Ошибка в колбэке profile: {e}", user_id=callback_query.from_user.id)
+
+
 
 
 @router.callback_query(F.data == "help_instruction")
