@@ -179,7 +179,7 @@ def get_session_management_keyboard(
             [
                 InlineKeyboardButton(
                     text="📁 Экспорт/Импорт Config", 
-                    callback_data=f"session_config_sync_{session_name}",
+                    callback_data=f"config_sync_{session_name}",
                 )
             ],
             [
