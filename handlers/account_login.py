@@ -10,6 +10,9 @@ from states.session_states import SessionAdd, SessionStates
 import logging
 from html import escape
 from aiogram.exceptions import TelegramBadRequest
+
+from services.config_service import get_user_limits
+
 from pyrogram.errors import (
     AuthBytesInvalid,
     FloodWait,
@@ -43,14 +46,21 @@ CUSTOM_APP_VERSION = "10.14.1"
 CUSTOM_LANG_CODE = "en"
 
 
+
+from services.config_service import get_user_limits
+
 @router.callback_query(F.data == "add_new_session")
 async def add_new_session_start(callback: types.CallbackQuery, state: FSMContext):
-    if not API_ID or not API_HASH:
-        await callback.message.edit_text(
-            "Извините, для добавления сессий боту необходимы настроенные API_ID и API_HASH.",
-            reply_markup=cancel_kb 
+    user_id = callback.from_user.id
+    limits = await get_user_limits(user_id)
+    
+    current_sessions = await Database.count_user_sessions(user_id)
+    if current_sessions >= limits["max_sessions"]:
+        return await callback.answer(
+            f"🚫 Лимит сессий исчерпан!\nМаксимум доступно: {limits['max_sessions']}",
+            show_alert=True
         )
-        return
+
 
     await state.set_state(SessionAdd.waiting_for_phone)
     await callback.message.edit_text(
