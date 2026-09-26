@@ -1,4 +1,12 @@
 {
+  "max_sessions_per_user": 3,
+  "max_export_channels_per_session": 10,
+  "max_post_channels_per_session": 5,
+
+  "premium_max_sessions_per_user": 10,
+  "premium_max_export_channels_per_session": 100,
+  "premium_max_post_channels_per_session": 25,
+
   "bot_logging": true,
   "telegram_logging": true,
   "console_logging": false,

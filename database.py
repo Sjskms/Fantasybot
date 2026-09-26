@@ -14,7 +14,31 @@ class Database:
     _fernet = None 
     _is_initialized = False
     
-    
+   # Добавить в class Database:
+
+    @staticmethod
+    async def count_user_sessions(user_id: int) -> int:
+        """Возвращает количество сессий пользователя."""
+        async with aiosqlite.connect(Database.DB_NAME) as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM user_sessions WHERE user_id = ?", (user_id,))
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+    @staticmethod
+    async def count_selected_channels(user_id: int, session_name: str, mode: str) -> int:
+        """Возвращает количество выбранных каналов для конкретного режима."""
+        configs = await Database.get_session_configs(user_id, session_name)
+        if not configs or "channels" not in configs:
+            return 0
+        
+        count = 0
+        for ch_data in configs["channels"].values():
+            m_cfg = ch_data.get("modes", {}).get(mode, {})
+            if m_cfg.get("enabled", False):
+                count += 1
+        return count
+        
+          
     @staticmethod
     async def get_session_channels_count(user_id: int, session_name: str, mode: str) -> int:
         async with aiosqlite.connect(Database.DB_NAME) as db:
@@ -198,7 +222,10 @@ class Database:
                     return None
             return None
 
-    @staticmethod
+    
+     
+        
+    @staticmethod   
     async def get_session_configs(user_id: int, session_name: str) -> dict:
         """Получает JSON-конфигурации для указанной сессии."""
         async with aiosqlite.connect(Database.DB_NAME) as db:
