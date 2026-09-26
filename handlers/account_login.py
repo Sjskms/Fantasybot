@@ -1,3 +1,4 @@
+# handlers/account_login.py
 from aiogram import F, Router, types
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -36,11 +37,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # =========================================================================
 # ПАРАМЕТРЫ УСТРОЙСТВА ПРИ АВТОРИЗАЦИИ В TELEGRAM (кастомизация уведомления)
 # =========================================================================
-CUSTOM_DEVICE_MODEL = "iPhone 20 Pro Max"
+CUSTOM_DEVICE_MODEL = "iPhone 15 Pro Max"
 CUSTOM_SYSTEM_VERSION = "iOS 17.5.1"
 CUSTOM_APP_VERSION = "10.14.1"
 CUSTOM_LANG_CODE = "en"
-CUSTOM_SYSTEM_LANG_CODE = "en-US"
 
 
 @router.callback_query(F.data == "add_new_session")
@@ -77,7 +77,9 @@ async def process_phone_number(message: types.Message, state: FSMContext):
 
     await message.answer("⏳ Отправляю запрос на код подтверждения...", reply_markup=types.ReplyKeyboardRemove())
 
+    temp_client = None
     try:
+        # Инициализируем клиент без system_lang_code
         temp_client = Client(
             name=str(message.from_user.id),
             api_id=API_ID,
@@ -86,8 +88,7 @@ async def process_phone_number(message: types.Message, state: FSMContext):
             device_model=CUSTOM_DEVICE_MODEL,
             system_version=CUSTOM_SYSTEM_VERSION,
             app_version=CUSTOM_APP_VERSION,
-            lang_code=CUSTOM_LANG_CODE,
-            system_lang_code=CUSTOM_SYSTEM_LANG_CODE
+            lang_code=CUSTOM_LANG_CODE
         )
 
         await temp_client.connect()
@@ -118,8 +119,8 @@ async def process_phone_number(message: types.Message, state: FSMContext):
         await message.answer("❌ Неверный номер телефона. Пожалуйста, попробуйте еще раз.", reply_markup=cancel_kb)
     except Exception as e:
         logger.error(f"Error sending code for user {message.from_user.id}: {e}", exc_info=True)
-        await message.answer("Произошла неизвестная ошибка при отправке кода. Пожалуйста, попробуйте еще раз.", reply_markup=cancel_kb)
-        if 'temp_client' in locals() and temp_client.is_connected:
+        await message.answer(f"Произошла ошибка при отправке кода: {e}", reply_markup=cancel_kb)
+        if temp_client and temp_client.is_connected:
             await temp_client.disconnect()
         await state.clear()
         user_sessions = await Database.get_user_sessions(message.from_user.id)
