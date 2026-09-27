@@ -2,7 +2,6 @@
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
-
 from config import TOKEN, FERNET_KEY
 from database import Database
 from handlers import admin, user, account_login,admin_limits
@@ -12,6 +11,9 @@ from services.logging_service import set_logging_bot_instance, load_global_loggi
 
 from handlers.session import router as session_router
 
+
+import uvicorn
+from web_admin import web_admin_app
 
 
 from services.forwarder.supervisor import restore_active_forwarders
@@ -40,6 +42,10 @@ async def main():
     # Запуск polling бота...
     await dp.start_polling(bot)
     
+    # Запуск FastAPI вместе с Aiogram
+
+
+
     
 
 async def main():
@@ -78,6 +84,22 @@ async def main():
     dp.include_router(account_login.router) 
     dp.include_router(admin_limits.router) 
     logging.info("Зарегистрированы хендлеры.")
+    
+    config = uvicorn.Config(
+        app=web_admin_app, 
+        host="0.0.0.0", 
+        port=8080, 
+        loop="asyncio"
+    )
+    server = uvicorn.Server(config)
+
+    # Запускаем сайт и бота параллельно
+    await asyncio.gather(
+        server.serve(),
+        dp.start_polling(bot)
+    )
+    logging.info("Зарегистрирован веб.")
+    
     
     # 7. Мидлвари
     dp.message.middleware(AuthMiddleware())
