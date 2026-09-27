@@ -1,11 +1,19 @@
+from aiogram.types import WebAppInfo, InlineKeyboardButton
+
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+
+
+
+web = '127.0.0.1'
+
 
 main_menu = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")],
         [InlineKeyboardButton(text="⚙️ Системные лимиты", callback_data="admin_limits_menu")],
+        [InlineKeyboardButton(text="🌐 Открыть Веб-Админку", web_app=WebAppInfo(url=f"http://{web}:8080"))],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="broadcast")] # НОВАЯ КНОПКА
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="broadcast")]
     ]
 )
 
