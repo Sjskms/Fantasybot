@@ -1,0 +1,21 @@
+# session/__init__.py
+from aiogram import Router
+
+from .lifecycle import router as lifecycle_router
+from .channels import router as channels_router
+from .statistics import router as statistics_router
+from .text_transform import router as text_transform_router
+from .logging import router as logging_router
+from .config_sync import router as config_sync_router 
+from .account_login import router as account_login_router
+
+
+router = Router()
+
+router.include_router(lifecycle_router)
+router.include_router(channels_router)
+router.include_router(statistics_router)
+router.include_router(text_transform_router)
+router.include_router(logging_router)
+router.include_router(config_sync_router)
+router.include_router(account_login_router)
