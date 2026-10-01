@@ -8,9 +8,12 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📱 Управление сессиями", callback_data="session_settings")],
         [
             InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
-            InlineKeyboardButton(text="📖 Инструкция", callback_data="help_instruction")
+            InlineKeyboardButton(text="преииум", callback_data="payment")
         ],
-        [InlineKeyboardButton(text="🛡 Безопасность и Защита", callback_data="security_info")]
+        [
+            InlineKeyboardButton(text="📖 Инструкция", callback_data="help_instruction"),
+           InlineKeyboardButton(text="🛡 Безопасность и Защита", callback_data="security_info")
+    ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
