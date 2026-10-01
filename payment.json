@@ -1,0 +1,25 @@
+{
+  "currency": "RUB",
+  "tariffs": [
+    {
+      "days": 1,
+      "price": 15
+    },
+    {
+      "days": 3,
+      "price": 30
+    },
+    {
+      "days": 7,
+      "price": 60
+    },
+    {
+      "days": 14,
+      "price": 100
+    },
+    {
+      "days": 30,
+      "price": 200
+    }
+  ]
+}

@@ -31,7 +31,32 @@ class Database:
     _fernet = None 
     _is_initialized = False
     
-   # Добавить в class Database:
+   # Добавить в class Database
+   
+
+    @staticmethod
+    async def is_payment_processed(payment_id: str) -> bool:
+        """Проверяет, был ли этот платеж уже обработан."""
+        async with aiosqlite.connect(Database.DB_NAME) as db:
+            async with db.execute(
+                "SELECT 1 FROM processed_payments WHERE payment_id = ?", (payment_id,)
+            ) as cursor:
+                return await cursor.fetchone() is not None
+
+    @staticmethod
+    async def mark_payment_processed(payment_id: str, user_id: int, days: int):
+        """Помечает платеж как успешно обработанный."""
+        now = get_msk_now().strftime("%Y-%m-%d %H:%M:%S")
+        async with aiosqlite.connect(Database.DB_NAME) as db:
+            await db.execute(
+                "INSERT INTO processed_payments (payment_id, user_id, days, date) VALUES (?, ?, ?, ?)",
+                (payment_id, user_id, days, now)
+            )
+            await db.commit()
+            
+            
+            
+            
 
     @staticmethod
     async def count_user_sessions(user_id: int) -> int:
@@ -177,7 +202,17 @@ class Database:
                           user_id INTEGER UNIQUE,
                           username TEXT)''')
 
-            # НОВАЯ ТАБЛИЦА: users
+            # Таблица для учета успешных платежей (защита от повторов)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS processed_payments (
+                    payment_id TEXT PRIMARY KEY,
+                    user_id INTEGER,
+                    days INTEGER,
+                    date TEXT
+                )
+            """)
+            
+            #юзеры
             await db.execute('''CREATE TABLE IF NOT EXISTS users (
                                 user_id INTEGER PRIMARY KEY UNIQUE,
                                 name TEXT,
