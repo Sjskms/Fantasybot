@@ -1,4 +1,4 @@
-# services/config_service.py
+# session/services/config_service.py
 import json
 import os
 import logging

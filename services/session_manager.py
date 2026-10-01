@@ -1,4 +1,4 @@
-# services/session_manager.py
+# session/services/session_manager.py
 from pyrogram import Client
 from database import Database
 
