@@ -5,7 +5,6 @@ from aiogram import Bot, Dispatcher
 from config import TOKEN, FERNET_KEY
 from database import Database
 from handlers import admin, user,admin_limits
-from payment import payment_CB
 from middlewares.auth import AuthMiddleware
 from services.scheduler import start_scheduler
 from services.logging_service import set_logging_bot_instance, load_global_logging_config, log_event
@@ -15,7 +14,7 @@ from session import router as session_router
 
 import uvicorn
 
-from payment import payment_main, payment_CB, payment_card
+from payment import router as payment_router
 
 
 
@@ -70,17 +69,19 @@ async def main():
     await restore_active_forwarders()
     logging.info("Автопостинг восстановлен.")
     
+    
     # 6. Регистрация роутеров
     #6.1 основа юзер и админам
     dp.include_router(admin.router)
     dp.include_router(user.router)
+    
+    
+    #6.2 работа с сессией
     dp.include_router(session_router)
     dp.include_router(admin_limits.router) 
     
-    #6.2 платежки
-    dp.include_router(payment_main.router)
-    dp.include_router(payment_CB.router)
-    dp.include_router(payment_card.router)
+    #6.3 платежки
+    dp.include_router(payment_router)
 
     logging.info("Зарегистрированы хендлеры.")
   
