@@ -20,8 +20,8 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
 def get_profile_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура раздела Профиль."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="преииум", callback_data="payment")],
         [InlineKeyboardButton(text="📱 Управление сессиями", callback_data="session_settings")],
-        [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")]
+        [InlineKeyboardButton(text="🌟 Премиум", callback_data="payment")],
+        [InlineKeyboardButton(text="◀️  Назад", callback_data="main_menu")]
     ])
 

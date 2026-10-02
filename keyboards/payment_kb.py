@@ -20,9 +20,13 @@ DEFAULT_PAYMENT_CONFIG = {
     }
 }
 
-
+def save_payment_config(config: dict):
+    """Сохраняет измененную конфигурацию в payment.json."""
+    with open(PAYMENT_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+        
 def load_payment_config() -> dict:
-    """Загружает конфигурацию оплаты из payment.json или создает дефолтную."""
+    """Загружает конфигурацию оплаты из payment.json, дополняя недостающие поля дефолтами."""
     if not os.path.exists(PAYMENT_CONFIG_PATH):
         try:
             with open(PAYMENT_CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -35,6 +39,19 @@ def load_payment_config() -> dict:
             data = json.load(f)
             if not isinstance(data, dict):
                 return DEFAULT_PAYMENT_CONFIG
+            
+            # АВТОДОПОЛНЕНИЕ: Если в старом JSON нет каких-то новых ключей, подставляем их
+            updated = False
+            for key, default_val in DEFAULT_PAYMENT_CONFIG.items():
+                if key not in data:
+                    data[key] = default_val
+                    updated = True
+            
+            # Если файл был дополнен новыми полями, сохраняем его обратно
+            if updated:
+                with open(PAYMENT_CONFIG_PATH, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+
             return data
     except Exception:
         return DEFAULT_PAYMENT_CONFIG
