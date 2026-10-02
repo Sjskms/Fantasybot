@@ -104,7 +104,7 @@ async def main_menu_callback_handler(callback_query: CallbackQuery):
 
 @router.callback_query(F.data == "profile")
 async def profile_callback_handler(callback_query: CallbackQuery):
-    """Раздел Профиль с расширенной статистикой лимитов сессий и каналов."""
+    """Раздел Профиль с расширенной статистикой лимитов сессий, каналов и статусом пересылки."""
     try:
         user_id = callback_query.from_user.id
         user_data = await Database.get_user(user_id)
@@ -144,17 +144,23 @@ async def profile_callback_handler(callback_query: CallbackQuery):
             sessions = await Database.get_user_sessions_list(user_id)
             total_sessions = len(sessions) if sessions else 0
 
-            # 4. Формируем подробный список по каждой сессии
+            # 4. Формируем подробный список по каждой сессии со статусом работы
             if sessions:
                 session_lines = []
                 for row in sessions:
                     session_name = row[0]
+                    # Получаем статус пересылки (True/False)
+                    is_running = await Database.get_session_posting_status(user_id, session_name)
+                    status_icon = "🟢" if is_running else "🔴"
+                    status_text = "Работает" if is_running else "Остановлена"
+
                     # Считаем количество выбранных каналов для экспорта и постинга
                     export_count = await Database.count_selected_channels(user_id, session_name, "export")
                     post_count = await Database.count_selected_channels(user_id, session_name, "post")
 
                     session_lines.append(
-                        f"  ▫️ <code>{session_name}</code>\n"
+                        f"  ▫️ <code>{session_name}</code> {status_icon}\n"
+                        f"      ├ Статус: <b>{status_text}</b>\n"
                         f"      ├ 📤 Экспорт: <b>{export_count}/{max_export}</b>\n"
                         f"      └ 📥 Постинг: <b>{post_count}/{max_post}</b>"
                     )
