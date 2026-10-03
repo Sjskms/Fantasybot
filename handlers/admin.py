@@ -91,6 +91,15 @@ EVENT_TITLES = {
     "forwarding_enabled": "🟢 Пересылка включена",
     "forwarding_disabled": "🔴 Пересылка выключена",
     "bot_error": "❌ Ошибка в боте",
+
+    # НОВЫЕ ТУМБЛЕРЫ ОПЛАТЫ:
+    "payment_success": "💰 Успешная оплата",
+    "payment_pending": "⏳ Создан счет / отправлен чек",
+    "payment_rejected": "❌ Отклоненный платеж",
+    "payment_cryptobot": "🤖 Логировать CryptoBot",
+    "payment_card": "💳 Логировать Карты РФ",
+    "payment_only_unpaid": "⚠️ Логировать ТОЛЬКО незавершенные",
+
     "other": "📝 Другое логирование",
 }
 
@@ -298,25 +307,6 @@ async def render_broadcast_preview(chat_id: int, state: FSMContext, bot: Bot):
 
 
 # --- РАЗДЕЛ НАСТРОЕК АДМИНИСТРАТОРА ---
-
-@router.callback_query(F.data == "settings", IsAdmin())
-async def admin_settings_handler(callback_query: CallbackQuery, state: FSMContext):
-    """Главное меню настроек администратора."""
-    await state.clear()
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📜 Настроить логирование", callback_data="settings_logging")],
-            [InlineKeyboardButton(text="🔐 Настроить доступ", callback_data="settings_access")],
-            [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="admin_panel")],
-        ]
-    )
-    await callback_query.message.edit_text(
-        "⚙️ <b>Настройки администратора</b>\n\nВыберите нужный раздел:",
-        reply_markup=kb,
-        parse_mode="HTML",
-    )
-    await callback_query.answer()
-
 
 @router.callback_query(F.data == "settings_access", IsAdmin())
 async def settings_access_handler(callback_query: CallbackQuery):
