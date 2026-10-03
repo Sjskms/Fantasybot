@@ -30,9 +30,60 @@ class Database:
     DB_NAME = 'data/db.db'
     _fernet = None 
     _is_initialized = False
-    
-   # Добавить в class Database
-   
+
+    @staticmethod
+    async def get_payment_stats() -> dict:
+        """Возвращает детальную аналитику заказов и финансов по шлюзам."""
+        now = get_msk_now()
+        today_str = now.strftime("%Y-%m-%d")
+        week_ago_str = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        month_ago_str = (now - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+        async with aiosqlite.connect(Database.DB_NAME) as db:
+            # Общее количество заказов
+            async with db.execute("SELECT COUNT(*) FROM processed_payments") as cur:
+                total_count = (await cur.fetchone())[0]
+            async with db.execute("SELECT COUNT(*) FROM processed_payments WHERE date LIKE ?", (f"{today_str}%",)) as cur:
+                today_count = (await cur.fetchone())[0]
+            async with db.execute("SELECT COUNT(*) FROM processed_payments WHERE date >= ?", (week_ago_str,)) as cur:
+                week_count = (await cur.fetchone())[0]
+            async with db.execute("SELECT COUNT(*) FROM processed_payments WHERE date >= ?", (month_ago_str,)) as cur:
+                month_count = (await cur.fetchone())[0]
+
+            # Сумма выданных дней и уникальные покупатели
+            async with db.execute("SELECT COALESCE(SUM(days), 0), COUNT(DISTINCT user_id) FROM processed_payments") as cur:
+                row = await cur.fetchone()
+                total_days = row[0]
+                unique_buyers = row[1]
+
+            # Вспомогательная функция для подсчета сумм по методу
+            async def get_method_revenue(method_name: str):
+                queries = {
+                    "today": ("SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM processed_payments WHERE method = ? AND date LIKE ?", (method_name, f"{today_str}%")),
+                    "week": ("SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM processed_payments WHERE method = ? AND date >= ?", (method_name, week_ago_str)),
+                    "month": ("SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM processed_payments WHERE method = ? AND date >= ?", (method_name, month_ago_str)),
+                    "all": ("SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM processed_payments WHERE method = ?", (method_name,)),
+                }
+                res = {}
+                for period, (sql, params) in queries.items():
+                    async with db.execute(sql, params) as c:
+                        r = await c.fetchone()
+                        res[period] = {"sum": round(r[0], 2), "cnt": r[1]}
+                return res
+
+            cb_stats = await get_method_revenue("cryptobot")
+            card_stats = await get_method_revenue("card")
+
+            return {
+                "total_count": total_count,
+                "today_count": today_count,
+                "week_count": week_count,
+                "month_count": month_count,
+                "total_days": total_days,
+                "unique_buyers": unique_buyers,
+                "cb": cb_stats,
+                "card": card_stats
+            }
 
     @staticmethod
     async def is_payment_processed(payment_id: str) -> bool:
@@ -44,14 +95,15 @@ class Database:
                 return await cursor.fetchone() is not None
 
     @staticmethod
-    async def mark_payment_processed(payment_id: str, user_id: int, days: int):
-        """Помечает платеж как успешно обработанный."""
+    async def mark_payment_processed(payment_id: str, user_id: int, days: int, amount: float = 0, currency: str = 'RUB', method: str = 'card'):
+        """Помечает платеж как обработанный с сохранением метода и суммы."""
         now = get_msk_now().strftime("%Y-%m-%d %H:%M:%S")
         async with aiosqlite.connect(Database.DB_NAME) as db:
-            await db.execute(
-                "INSERT INTO processed_payments (payment_id, user_id, days, date) VALUES (?, ?, ?, ?)",
-                (payment_id, user_id, days, now)
-            )
+            await db.execute("""
+                INSERT INTO processed_payments (payment_id, user_id, days, amount, currency, method, date)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(payment_id) DO NOTHING
+            """, (payment_id, user_id, days, float(amount), currency, method, now))
             await db.commit()
             
             
@@ -208,9 +260,11 @@ class Database:
                     payment_id TEXT PRIMARY KEY,
                     user_id INTEGER,
                     days INTEGER,
+                    amount REAL DEFAULT 0,
+                    currency TEXT DEFAULT 'RUB',
+                    method TEXT DEFAULT 'card',
                     date TEXT
-                )
-            """)
+                )""")
             
             #юзеры
             await db.execute('''CREATE TABLE IF NOT EXISTS users (

@@ -1,10 +1,4 @@
 {
-  "max_sessions_per_user": 1,
-  "max_export_channels_per_session": 10,
-  "max_post_channels_per_session": 3,
-  "premium_max_sessions_per_user": 15,
-  "premium_max_export_channels_per_session": 100,
-  "premium_max_post_channels_per_session": 25,
   "bot_logging": true,
   "telegram_logging": true,
   "console_logging": false,
@@ -21,6 +15,18 @@
     "forwarding_enabled": true,
     "forwarding_disabled": true,
     "bot_error": true,
-    "other": true
-  }
+    "other": true,
+    "payment_success": true,
+    "payment_pending": true,
+    "payment_rejected": true,
+    "payment_cryptobot": true,
+    "payment_card": true,
+    "payment_only_unpaid": false
+  },
+  "max_sessions_per_user": 1,
+  "max_export_channels_per_session": 10,
+  "max_post_channels_per_session": 3,
+  "premium_max_sessions_per_user": 15,
+  "premium_max_export_channels_per_session": 100,
+  "premium_max_post_channels_per_session": 25
 }
