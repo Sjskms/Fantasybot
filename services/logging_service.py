@@ -1,4 +1,4 @@
-# session/services/logging_service.py
+# services/logging_service.py
 import asyncio
 import datetime
 import json
@@ -14,7 +14,6 @@ from database import Database
 
 logger = logging.getLogger(__name__)
 
-# Фиксированный путь к файлам логирования в корне проекта
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_FILE = os.path.join(BASE_DIR, "bot_logging_config.json")
 LOG_FILE_PATH = os.path.join(BASE_DIR, "bot_events.log")
@@ -37,6 +36,13 @@ DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
         "forwarding_disabled": True,
         "bot_error": True,
         "other": True,
+        # НАСТРОЙКИ ЛОГИРОВАНИЯ ПЛАТЕЖЕЙ:
+        "payment_success": True,        # Успешные зачисления Премиум
+        "payment_pending": True,        # Созданные счета и отправленные чеки
+        "payment_rejected": True,       # Отклоненные чеки
+        "payment_cryptobot": True,      # Логировать ли CryptoBot
+        "payment_card": True,           # Логировать ли карты РФ
+        "payment_only_unpaid": False,   # Логировать ТОЛЬКО незавершенные/ошибочные
     },
 }
 
@@ -64,11 +70,7 @@ def strip_html_tags(text: str) -> str:
 
 
 async def load_global_logging_config() -> Dict[str, Any]:
-    """
-    Загружает глобальные настройки логирования из JSON-файла.
-    ВНИМАНИЕ: Если файл существует, существующие настройки пользователя сохраняются 
-    и НЕ перезаписываются дефолтными значениями!
-    """
+    """Загружает глобальные настройки логирования из JSON-файла."""
     global _current_config
 
     if not os.path.exists(CONFIG_FILE):
@@ -85,11 +87,9 @@ async def load_global_logging_config() -> Dict[str, Any]:
                 return _current_config
             loaded = json.loads(content)
 
-        # Берем сохраненный конфиг пользователя за основу
         merged = DEFAULT_LOGGING_CONFIG.copy()
         merged.update(loaded)
 
-        # Отдельно сохраняем значения вложенных событий, не затирая пользовательские тумблеры
         if "events" in loaded and isinstance(loaded["events"], dict):
             user_events = DEFAULT_LOGGING_CONFIG["events"].copy()
             user_events.update(loaded["events"])
@@ -133,7 +133,7 @@ async def append_to_log_file(event_key: str, message: str):
 
 
 async def cleanup_log_file(period: Optional[str] = None, force: bool = False):
-    """Очищает файл логов от устаревших записей (не чаще раза в 6 часов)."""
+    """Очищает файл логов от устаревших записей."""
     global _last_cleanup_time
     now = asyncio.get_event_loop().time()
 
@@ -193,7 +193,7 @@ async def cleanup_log_file(period: Optional[str] = None, force: bool = False):
 
 
 async def get_user_info_block(user_id: Optional[int]) -> str:
-    """Динамически достает информацию о пользователе из базы данных для логов админа."""
+    """Динамически достает информацию о пользователе для логов."""
     if not user_id:
         return ""
     
@@ -210,14 +210,16 @@ async def get_user_info_block(user_id: Optional[int]) -> str:
     return f"\n👤 <b>Пользователь ID:</b> <code>{user_id}</code>"
 
 
-async def log_event(event_key: str, message: str, extra_console: str = "", user_id: Optional[int] = None):
+async def log_event(
+    event_key: str, 
+    message: str, 
+    extra_console: str = "", 
+    user_id: Optional[int] = None,
+    payment_method: Optional[str] = None  # 'cryptobot' или 'card'
+):
     """
     Глобальное логирование для администраторов.
-    1. Пишет в консоль (если включено console_logging).
-    2. Дописывает в текстовый файл bot_events.log (если включено file_logging).
-    3. Отправляет в Telegram (если включено telegram_logging):
-       - В целевой канал/чат (если задан telegram_log_chat_id).
-       - Админу из config.py (если chat_id не задан).
+    Поддерживает точечные фильтры платежей (по методу и по статусу оплаты).
     """
     cfg = get_cached_logging_config()
 
@@ -225,23 +227,37 @@ async def log_event(event_key: str, message: str, extra_console: str = "", user_
         return
 
     events_cfg = cfg.get("events", {})
+
+    # 1. Проверка основного тумблера события
     if not events_cfg.get(event_key, True):
         return
+
+    # 2. Проверки для платежных событий
+    if event_key.startswith("payment_"):
+        # Проверка включения конкретного метода оплаты
+        if payment_method == "cryptobot" and not events_cfg.get("payment_cryptobot", True):
+            return
+        if payment_method == "card" and not events_cfg.get("payment_card", True):
+            return
+
+        # Если включена галочка "Логировать ТОЛЬКО незавершенные платежи"
+        if events_cfg.get("payment_only_unpaid", False) and event_key == "payment_success":
+            return
 
     user_info_str = await get_user_info_block(user_id)
     final_message = message + user_info_str
 
-    # 1. Логирование в консоль
+    # Логирование в консоль
     if cfg.get("console_logging", True):
         console_text = extra_console if extra_console else strip_html_tags(final_message).strip()
         logger.info("[LOG:%s] %s", event_key.upper(), console_text)
 
-    # 2. Логирование в файл
+    # Логирование в файл
     if cfg.get("file_logging", True):
         await append_to_log_file(event_key, final_message)
         asyncio.create_task(cleanup_log_file())
 
-    # 3. Логирование в Telegram
+    # Логирование в Telegram
     if cfg.get("telegram_logging", True) and _bot_ref:
         safe_msg = final_message if len(final_message) <= 4000 else final_message[:3990] + "..."
         target_chat_id = cfg.get("telegram_log_chat_id")
@@ -255,9 +271,8 @@ async def log_event(event_key: str, message: str, extra_console: str = "", user_
                     disable_web_page_preview=True,
                 )
             except Exception as e:
-                logger.error("Ошибка отправки глобального лога в чат %s: %s", target_chat_id, e)
+                logger.error("Ошибка отправки лога в чат %s: %s", target_chat_id, e)
         else:
-            # Отправка строго администраторам из config.py
             try:
                 from my_filters.admin_filter import get_config_admin_ids
                 admin_ids = list(get_config_admin_ids())
