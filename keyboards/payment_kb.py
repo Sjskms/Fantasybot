@@ -111,6 +111,15 @@ def get_payment_methods_keyboard(days: int, price: float, currency: str) -> Inli
             )
         ])
 
+    # Если все шлюзы временно выключены админом
+    if not rows:
+        rows.append([
+            InlineKeyboardButton(
+                text="⚠️ Приём платежей временно приостановлен",
+                callback_data="ignore_btn"
+            )
+        ])
+
     rows.append([
         InlineKeyboardButton(text="◀️ К выбору тарифов", callback_data="payment")
     ])
@@ -118,14 +127,15 @@ def get_payment_methods_keyboard(days: int, price: float, currency: str) -> Inli
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def get_admin_card_confirmation_keyboard(user_id: int, days: int, payment_id: str) -> InlineKeyboardMarkup:
-    """Клавиатура админа для подтверждения/отклонения ручного чека."""
+def get_admin_card_confirmation_keyboard(user_id: int, days: int, price: float, payment_id: str) -> InlineKeyboardMarkup:
+    """Клавиатура для администратора для подтверждения или отклонения ручного чека."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="✅ Подтвердить и выдать",
-                    callback_data=f"adm_pay_confirm:{user_id}:{days}:{payment_id}"
+                    # Передаем цену 4-м параметром
+                    callback_data=f"adm_pay_confirm:{user_id}:{days}:{price}:{payment_id}"
                 )
             ],
             [

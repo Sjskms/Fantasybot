@@ -8,10 +8,9 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 
 main_menu = InlineKeyboardMarkup(
     inline_keyboard=[
-        [
-        InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings"),
-        InlineKeyboardButton(text="⚙️ Лимиты", callback_data="admin_limits_menu")
-        ],
+        [InlineKeyboardButton(text="🔐 Настроить доступ", callback_data="settings_access")],
+        [InlineKeyboardButton(text="📜 Настроить логирование", callback_data="settings_logging")],
+        [InlineKeyboardButton(text="⚙️ Лимиты", callback_data="admin_limits_menu")],
         [InlineKeyboardButton(text="🌟 Платежная система", callback_data="payment_settings")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="broadcast")]
