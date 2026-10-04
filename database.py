@@ -573,16 +573,16 @@ class Database:
                 
                 
                 
-    @staticmethod
-    async def add_user(user_id, name, user_username, registration_date,session):
-        """Добавляет нового пользователя, если его нет в базе."""
-        async with aiosqlite.connect(Database.DB_NAME) as db:
-            await db.execute('''
-                INSERT OR IGNORE INTO users (user_id, name, username, registration_date, session)
-                VALUES (?, ?, ?, ?,?)
-            ''', (user_id, name, user_username, registration_date,session))
-            await db.commit()
-            #logger.info(f"User {user_id} added or already exists.")
+    #@staticmethod
+#    async def add_user(user_id, name, user_username, registration_date,session):
+#        """Добавляет нового пользователя, если его нет в базе."""
+#        async with aiosqlite.connect(Database.DB_NAME) as db:
+#            await db.execute('''
+#                INSERT OR IGNORE INTO users (user_id, name, username, registration_date, session)
+#                VALUES (?, ?, ?, ?,?)
+#            ''', (user_id, name, user_username, registration_date,session))
+#            await db.commit()
+#            #logger.info(f"User {user_id} added or already exists.")
 
 
     @staticmethod
