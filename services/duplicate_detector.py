@@ -19,8 +19,9 @@ DB_PATH = "data/duplicate_detector.db"
 DEFAULT_HAMMING_THRESHOLD = 4
 
 
+
 def init_duplicate_db():
-    """Инициализация отдельной базы данных для дубликатов."""
+    """Инициализация базы данных и создание всех необходимых таблиц."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -35,7 +36,6 @@ def init_duplicate_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Таблица индивидуальных настроек пользователя (вкл/выкл антиповтор)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_antidup_settings (
             user_id INTEGER PRIMARY KEY,
@@ -59,18 +59,21 @@ async def is_antidup_enabled_for_user(user_id: int) -> bool:
         if not is_prem:
             return False
 
-    # Проверяем личный переключатель пользователя
     def _check_db():
+        # Гарантируем, что таблица существует перед запросом
+        init_duplicate_db()
+        
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("SELECT is_enabled FROM user_antidup_settings WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
         conn.close()
         if row is None:
-            return True   #по умолчанию включено
+            return True  # по умолчанию включено
         return bool(row[0])
 
     return await asyncio.to_thread(_check_db)
+    
 
 
 async def set_user_antidup_status(user_id: int, enabled: bool):
