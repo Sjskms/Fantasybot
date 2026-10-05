@@ -36,8 +36,9 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 CHANNELS_PER_PAGE = 15
-
-
+   
+    
+    
 def encode_value(value: str) -> str:
     return quote(str(value), safe="")
 
@@ -267,6 +268,8 @@ async def render_channel_page(callback: CallbackQuery, state: FSMContext, mode: 
 
 
 
+    
+    
 @router.callback_query(F.data.startswith("list_"))
 async def open_channel_list(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_", 2)
