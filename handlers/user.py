@@ -22,6 +22,28 @@ async def check_is_admin(user_id: int) -> bool:
     return await Database.is_admin(user_id)
 
 
+from services.duplicate_detector import is_antidup_enabled_for_user, set_user_antidup_status
+
+from services.duplicate_detector import (
+    get_text_hash, 
+    calculate_average_hash, 
+    process_channel_post_duplicate
+)
+
+
+@router.callback_query(F.data.startswith("toggle_antidup_"))
+async def toggle_user_antidup(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    current_status = await is_antidup_enabled_for_user(user_id)
+    new_status = not current_status
+    await set_user_antidup_status(user_id, new_status)
+    
+    await callback.answer(f"Анти-повтор успешно {'включен' if new_status else 'выключен'}!", show_alert=True)
+    
+    
+    
+    
+
 @router.message(Command("start"))
 async def start_handler(message: types.Message):
     try:

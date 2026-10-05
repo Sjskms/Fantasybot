@@ -139,6 +139,33 @@ def get_logging_main_kb(cfg: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+
+
+@router.callback_query(F.data == "admin_antidup_mode", IsAdmin())
+async def admin_antidup_menu(callback: CallbackQuery):
+    config = read_full_config()
+    mode = config.get("anti_duplicate_mode", "all")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{'🟢 ' if mode == 'all' else ''}Доступно всем", callback_data="set_ad_mode:all")],
+        [InlineKeyboardButton(text=f"{'⭐ ' if mode == 'premium' else ''}Только Premium", callback_data="set_ad_mode:premium")],
+        [InlineKeyboardButton(text=f"{'🔴 ' if mode == 'off' else ''}Отключить полностью", callback_data="set_ad_mode:off")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")]
+    ])
+    await callback.message.edit_text("⚙️ <b>Глобальный режим функции «Анти-повтор»</b>", reply_markup=kb, parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("set_ad_mode:"), IsAdmin())
+async def set_admin_antidup_mode(callback: CallbackQuery):
+    new_mode = callback.data.split(":")[1]
+    config = read_full_config()
+    config["anti_duplicate_mode"] = new_mode
+    update_limit_in_config("anti_duplicate_mode", new_mode) # Сохранение в JSON
+    await callback.answer("Режим анти-повтора обновлен!", show_alert=True)
+    await admin_antidup_menu(callback)
+    
+    
+    
+
 def get_cleanup_period_kb() -> InlineKeyboardMarkup:
     """Клавиатура выбора срока хранения логов в файле."""
     return InlineKeyboardMarkup(
