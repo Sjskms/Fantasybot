@@ -177,6 +177,12 @@ def get_session_management_keyboard(
                 )
             ],
             [
+               InlineKeyboardButton(
+                    text="🔂 Анти-повтор: ВКЛ/ВЫКЛ",
+                    callback_data=f"toggle_antidup_{session_name}"
+                )
+            ],
+            [
                 InlineKeyboardButton(
                     text="📁 Экспорт/Импорт Config", 
                     callback_data=f"config_sync_{session_name}",
