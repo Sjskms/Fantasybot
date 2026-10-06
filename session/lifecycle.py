@@ -78,7 +78,7 @@ async def select_session_handler(callback: CallbackQuery):
     session_configs = await Database.get_session_configs(user_id, session_name)
 
     text = build_forwarding_status_text(session_name, session_configs, enable_posting)
-    keyboard = get_session_management_keyboard(session_name=session_name, enable_posting=enable_posting)
+    keyboard = get_session_management_keyboard(session_name=session_name, enable_posting=enable_posting,user_id=callback.from_user.id)
 
     try:
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
@@ -92,7 +92,7 @@ async def session_config_handler(callback: CallbackQuery):
     session_name = callback.data.removeprefix("session_config_")
     user_id = callback.from_user.id
     enable_posting_status = await Database.get_session_posting_status(user_id, session_name)
-    keyboard = get_session_management_keyboard(session_name, enable_posting_status)
+    keyboard = get_session_management_keyboard(session_name, enable_posting_status,user_id=callback.from_user.id)
 
     try:
         await callback.message.edit_text(
@@ -139,7 +139,7 @@ async def toggle_posting_handler(callback: CallbackQuery):
     actual_status = await Database.get_session_posting_status(user_id, session_name)
     session_configs = await Database.get_session_configs(user_id, session_name)
     text = build_forwarding_status_text(session_name, session_configs, actual_status)
-    keyboard = get_session_management_keyboard(session_name=session_name, enable_posting=actual_status)
+    keyboard = get_session_management_keyboard(session_name=session_name, enable_posting=actual_status,user_id=callback.from_user.id)
 
     try:
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
