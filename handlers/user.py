@@ -27,7 +27,6 @@ from services.duplicate_detector import is_antidup_enabled_for_user, set_user_an
 from services.duplicate_detector import (
     get_text_hash, 
     calculate_average_hash, 
-    process_channel_post_duplicate
 )
 
 
