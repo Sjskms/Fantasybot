@@ -397,12 +397,12 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
         await finish_message(source_chat_id, message.id)
 
 
-async def keep_channels_alive(client: Client, user_id: int, session_name: str, session_configs: dict):
+async def keep_channels_alive(client: Client, user_id: int, session_name: str, session_configs: dict = None):
     """Фоновая задача для удержания каналов активными и чтения истории."""
     await asyncio.sleep(4)
     while client.is_connected:
         try:
-            cfg = loaded_configs.get((user_id, session_name), {})
+            cfg = session_configs or loaded_configs.get((user_id, session_name), {})
             exp_channels = get_export_channels(cfg.get("channels", {}))
             for ch_id in exp_channels.keys():
                 try:
