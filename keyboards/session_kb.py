@@ -128,15 +128,25 @@ def get_text_transform_keyboard(session_name: str, transform_config: dict) -> In
     ])
     
     
-def get_session_management_keyboard(
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from services.duplicate_detector import is_antidup_enabled_for_user
+
+async def get_session_management_keyboard(
     session_name: str,
     enable_posting: bool,
+    user_id: int,
 ) -> InlineKeyboardMarkup:
+    """Генерирует клавиатуру управления сессией с динамическим статусом анти-повтора."""
+    
     toggle_button_text = (
         "⏹ Выключить пересылку"
         if enable_posting
         else "▶️ Запустить пересылку"
     )
+
+    # Проверяем текущий статус анти-повтора для пользователя
+    is_antidup_on = await is_antidup_enabled_for_user(user_id)
+    antidup_icon = "🟢 Вкл" if is_antidup_on else "🔴 Выкл"
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -149,7 +159,7 @@ def get_session_management_keyboard(
             [
                 InlineKeyboardButton(
                     text="⚙️ Общие фильтры для всех",
-                    callback_data=f"g_filt_{session_name}",  # 👈 Сократили префикс
+                    callback_data=f"g_filt_{session_name}",
                 )
             ],
             [
@@ -178,7 +188,7 @@ def get_session_management_keyboard(
             ],
             [
                InlineKeyboardButton(
-                    text="🔂 Анти-повтор: ВКЛ/ВЫКЛ",
+                    text=f"🔂 Анти-повтор: {antidup_icon}",
                     callback_data=f"toggle_antidup_{session_name}"
                 )
             ],
@@ -202,6 +212,7 @@ def get_session_management_keyboard(
             ],
         ]
     )
+
     
     
 
