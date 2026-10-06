@@ -1,6 +1,7 @@
 # services/forwarder/engine.py
 import asyncio
 import copy
+import io
 import logging
 from html import escape
 
@@ -10,8 +11,6 @@ from pyrogram.types import (
     Message,
     InputMediaPhoto,
     InputMediaVideo,
-    InputMediaAudio,
-    InputMediaDocument,
 )
 
 from database import Database
@@ -30,6 +29,11 @@ from services.forwarder.transformer import (
     get_message_html,
     transform_text,
 )
+from services.duplicate_detector import (
+    get_text_hash,
+    calculate_average_hash,
+    process_and_clean_duplicate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +45,7 @@ async def record_channel_stat(
     stat_type: str,
     count: int = 1,
 ):
-    """
-    Увеличивает счетчик статистики конкретного канала:
-    stat_type: 'forwarded', 'filtered', 'errors'
-    """
+    """Увеличивает счетчик статистики конкретного канала."""
     key = (user_id, session_name)
     cfg = loaded_configs.get(key)
     if not cfg:
@@ -62,7 +63,6 @@ async def record_channel_stat(
         })
         ch_stats[stat_type] = ch_stats.get(stat_type, 0) + count
         
-        # Фоновое сохранение в базу данных
         try:
             await Database.update_session_configs(user_id, session_name, cfg)
         except Exception as e:
@@ -70,7 +70,7 @@ async def record_channel_stat(
 
 
 def calculate_session_stats(session_configs: dict) -> tuple[int, int, int]:
-    """Считает общую сумму (переслано, отфильтровано, ошибки) по всем каналам."""
+    """Считает общую сумму статистики по всем каналам."""
     total_forwarded = 0
     total_filtered = 0
     total_errors = 0
@@ -125,6 +125,7 @@ async def send_user_log(
 
 
 def get_export_channels(channels_config: dict) -> dict[int, dict]:
+    """Возвращает словарь каналов, настроенных на экспорт."""
     result = {}
     if not isinstance(channels_config, dict):
         return result
@@ -140,6 +141,7 @@ def get_export_channels(channels_config: dict) -> dict[int, dict]:
 
 
 def get_post_channels(channels_config: dict) -> list[int]:
+    """Возвращает список ID каналов для постинга."""
     result = []
     if not isinstance(channels_config, dict):
         return result
@@ -155,6 +157,7 @@ def get_post_channels(channels_config: dict) -> list[int]:
 
 
 def get_channel_title(chat_id: int, channels_config: dict, fallback_title: str = None) -> str:
+    """Возвращает название канала."""
     raw_id = str(chat_id)
     cdata = channels_config.get(raw_id, {})
     title = cdata.get("title") or fallback_title or f"Канал {chat_id}"
@@ -162,6 +165,7 @@ def get_channel_title(chat_id: int, channels_config: dict, fallback_title: str =
 
 
 def make_message_link(chat_id: int, message_id: int, username: str = None) -> str:
+    """Формирует прямую ссылку на сообщение в Telegram."""
     if username:
         return f"https://t.me/{username.lstrip('@')}/{message_id}"
     str_id = str(chat_id)
@@ -177,6 +181,7 @@ async def forward_album_delayed(
     session_name: str,
     session_configs: dict,
 ):
+    """Отложенная пересылка медиагруппы (альбома)."""
     await asyncio.sleep(1.5)
     buffer = media_group_buffers.pop(buffer_key, None)
     if not buffer:
@@ -229,7 +234,6 @@ async def forward_album_delayed(
                 f"📤 Из: <b>{source_title}</b> (<a href='{src_link}'>#{messages[0].id}</a>)\n"
                 f"📥 В: <b>{target_title}</b> (<a href='{dest_link}'>#{sent_msg_id}</a>)"
             )
-            # Статистика: переслано
             await record_channel_stat(user_id, session_name, source_chat, "forwarded")
             await send_user_log(user_id, "success", log_msg, session_configs)
             await log_event("forward_success", log_msg, user_id=user_id)
@@ -241,7 +245,6 @@ async def forward_album_delayed(
                 f"📥 В: <b>{target_title}</b> [<code>{target_chat_id}</code>]\n"
                 f"⚠️ Ошибка: <code>{escape(str(error))}</code>"
             )
-            # Статистика: ошибка
             await record_channel_stat(user_id, session_name, source_chat, "errors")
             await send_user_log(user_id, "error", err_msg, session_configs)
             await log_event("forward_error", err_msg, user_id=user_id)
@@ -259,6 +262,7 @@ async def forward_single_message(
     src_link: str,
     full_config: dict,
 ):
+    """Пересылает одиночное сообщение и выполняет проверку на анти-повтор."""
     channels_config = full_config.get("channels", {})
     target_title = get_channel_title(target_chat_id, channels_config)
 
@@ -274,13 +278,47 @@ async def forward_single_message(
         else:
             sent_msg = await message.copy(target_chat_id, caption=new_text, parse_mode=ParseMode.HTML)
 
+        # Проверка и обработка дубликатов в канале постинга
+        if sent_msg:
+            is_duplicate = False
+            
+            if message.text or message.caption:
+                txt_to_check = message.text or message.caption
+                t_hash = get_text_hash(txt_to_check)
+                if t_hash:
+                    is_duplicate = await process_and_clean_duplicate(
+                        client=client, chat_id=target_chat_id, message_id=sent_msg.id,
+                        user_id=user_id, post_type="text", current_hash=t_hash, session_configs=full_config
+                    )
+            elif message.photo:
+                try:
+                    file_in_mem = io.BytesIO()
+                    await client.download_media(message.photo.file_id, in_memory=file_in_mem)
+                    img_hash = calculate_average_hash(file_in_mem.getvalue())
+                    if img_hash:
+                        is_duplicate = await process_and_clean_duplicate(
+                            client=client, chat_id=target_chat_id, message_id=sent_msg.id,
+                            user_id=user_id, post_type="photo", current_hash=img_hash, session_configs=full_config
+                        )
+                except Exception as e:
+                    logger.debug(f"Не удалось проверить дубликат фото: {e}")
+            elif message.video:
+                video = message.video
+                meta_info = f"{video.file_size}_{video.duration}"
+                is_duplicate = await process_and_clean_duplicate(
+                    client=client, chat_id=target_chat_id, message_id=sent_msg.id,
+                    user_id=user_id, post_type="video", current_hash=video.file_unique_id, meta_info=meta_info, session_configs=full_config
+                )
+
+            if is_duplicate:
+                return
+
         dest_link = make_message_link(target_chat_id, sent_msg.id) if sent_msg else ""
         log_msg = (
             f"✅ <b>Сообщение переслано</b>\n"
             f"📤 Из: <b>{source_title}</b> (<a href='{src_link}'>#{message.id}</a>)\n"
             f"📥 В: <b>{target_title}</b> (<a href='{dest_link}'>#{sent_msg.id}</a>)"
         )
-        # Статистика: переслано
         await record_channel_stat(user_id, session_name, source_chat_id, "forwarded")
         await send_user_log(user_id, "success", log_msg, full_config)
         await log_event("forward_success", log_msg, user_id=user_id)
@@ -292,13 +330,13 @@ async def forward_single_message(
             f"📥 В: <b>{target_title}</b> [<code>{target_chat_id}</code>]\n"
             f"⚠️ Ошибка: <code>{escape(str(error))}</code>"
         )
-        # Статистика: ошибка
         await record_channel_stat(user_id, session_name, source_chat_id, "errors")
         await send_user_log(user_id, "error", err_msg, full_config)
         await log_event("forward_error", err_msg, user_id=user_id)
 
 
 async def handle_incoming_message(client: Client, message: Message, user_id: int, session_name: str):
+    """Обрабатывает входящее сообщение из канала-источника."""
     if not message.chat:
         return
     source_chat_id = int(message.chat.id)
@@ -321,7 +359,6 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
 
         if not is_message_allowed(message, export_mode.get("filters", {})):
             log_msg = f"ℹ️ <b>Отфильтровано</b>\nИсточник: <b>{source_title}</b>\nПост: <a href='{src_link}'>#{message.id}</a>"
-            # Статистика: отфильтровано
             await record_channel_stat(user_id, session_name, source_chat_id, "filtered")
             await send_user_log(user_id, "filtered", log_msg, full_config)
             await log_event("forward_filtered", log_msg, user_id=user_id)
@@ -360,7 +397,8 @@ async def handle_incoming_message(client: Client, message: Message, user_id: int
         await finish_message(source_chat_id, message.id)
 
 
-async def keep_channels_alive(client: Client, user_id: int, session_name: str):
+async def keep_channels_alive(client: Client, user_id: int, session_name: str, session_configs: dict):
+    """Фоновая задача для удержания каналов активными и чтения истории."""
     await asyncio.sleep(4)
     while client.is_connected:
         try:
