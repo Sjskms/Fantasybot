@@ -19,9 +19,8 @@ DB_PATH = "data/duplicate_detector.db"
 DEFAULT_HAMMING_THRESHOLD = 4
 
 
-
 def init_duplicate_db():
-    """Инициализация базы данных и создание всех необходимых таблиц."""
+    """Инициализация отдельной базы данных для дубликатов."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -60,9 +59,7 @@ async def is_antidup_enabled_for_user(user_id: int) -> bool:
             return False
 
     def _check_db():
-        # Гарантируем, что таблица существует перед запросом
         init_duplicate_db()
-        
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("SELECT is_enabled FROM user_antidup_settings WHERE user_id = ?", (user_id,))
@@ -73,12 +70,12 @@ async def is_antidup_enabled_for_user(user_id: int) -> bool:
         return bool(row[0])
 
     return await asyncio.to_thread(_check_db)
-    
 
 
 async def set_user_antidup_status(user_id: int, enabled: bool):
     """Включает или выключает анти-повтор для конкретного юзера."""
     def _save_db():
+        init_duplicate_db()
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("""
@@ -116,19 +113,28 @@ def get_hamming_distance(hash1: str, hash2: str) -> int:
     return sum(c1 != c2 for c1, c2 in zip(hash1, hash2))
 
 
-# --- ОБРАБОТКА ДУБЛИКАТОВ ---
+# --- ОБРАБОТКА ДУБЛИКАТОВ С ЛОГИРОВАНИЕМ ДЛЯ ЮЗЕРА ---
 
-async def process_channel_post_duplicate(bot: Bot, message: Message, user_id: int, post_type: str, current_hash: str, meta_info: str = "") -> bool:
-    """Проверяет пост на дубликат. Если найден — удаляет и возвращает True."""
-    if not await is_antidup_enabled_for_user(user_id):
-        return False
-
-    chat_id = message.chat.id
-    message_id = message.message_id
+async def process_and_clean_duplicate(
+    client,
+    chat_id: int,
+    message_id: int,
+    user_id: int,
+    post_type: str,
+    current_hash: str,
+    session_configs: dict,
+    meta_info: str = ""
+) -> bool:
+    """
+    Проверяет пост на дубликат. 
+    - Если анти-повтор ВКЛЮЧЕН: удаляет пост и шлет лог об удалении.
+    - Если анти-повтор ВЫКЛЮЧЕН: НЕ удаляет, но присылает пользователю уведомление о найденном повторе.
+    """
     config = read_full_config()
     threshold = config.get("anti_duplicate_hamming_threshold", DEFAULT_HAMMING_THRESHOLD)
 
     def _fetch_records():
+        init_duplicate_db()
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("SELECT message_id, content_hash, meta_info FROM channel_posts WHERE chat_id = ? AND post_type = ?", (chat_id, post_type))
@@ -164,20 +170,50 @@ async def process_channel_post_duplicate(bot: Bot, message: Message, user_id: in
                 break
 
     if is_duplicate:
-        try:
-            chat_username = message.chat.username
-            orig_link = f"https://t.me/{chat_username}/{original_msg_id}" if chat_username else f"https://t.me/c/{str(chat_id).replace('-100', '')}/{original_msg_id}"
+        # Формируем ссылку на оригинальный пост
+        str_id = str(chat_id)
+        if str_id.startswith("-100"):
+            orig_link = f"https://t.me/c/{str_id[4:]}/{original_msg_id}"
+        else:
+            orig_link = f"https://t.me/c/{str_id.lstrip('-')}/{original_msg_id}"
 
-            await bot.delete_message(chat_id, message_id)
-            logger.info(f"Удален дубликат ({post_type}) в канале {chat_id}. Оригинал: {orig_link}")
-            return True
-        except TelegramBadRequest as e:
-            logger.error(f"Не удалось удалить дубликат (нет прав админа): {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Ошибка обработки дубликата: {e}")
+        dup_link = f"https://t.me/c/{str_id[4:]}/{message_id}" if str_id.startswith("-100") else f"https://t.me/c/{str_id.lstrip('-')}/{message_id}"
+
+        # Проверяем, включен ли анти-повтор у пользователя
+        antidup_enabled = await is_antidup_enabled_for_user(user_id)
+
+        # Отправка лога пользователю через функцию send_user_log из engine (импортируем локально для избежания циклических импортов)
+        from services.forwarder.engine import send_user_log
+
+        if antidup_enabled:
+            try:
+                # Удаляем дубликат через сессию юзербота
+                await client.delete_messages(chat_id=chat_id, message_ids=message_id)
+                logger.info(f"🛡 Анти-повтор: удален дубликат ({post_type}) в канале {chat_id} (Оригинал ID: {original_msg_id})")
+
+                log_msg = (
+                    f"⚠️ <b>Анти-повтор: Обнаружен и удален дубликат!</b>\n"
+                    f"├ 📌 Тип: <b>{post_type.upper()}</b>\n"
+                    f"├ 🔗 Оригинал: <a href='{orig_link}'>Открыть пост</a>\n"
+                    f"└ 🗑 Удаленный дубликат: ID <code>{message_id}</code>"
+                )
+                await send_user_log(user_id, "success", log_msg, session_configs)
+                return True
+            except Exception as e:
+                logger.error(f"❌ Не удалось удалить дубликат через Pyrogram сессию: {e}")
+                return False
+        else:
+            # Анти-повтор выключен: сообщаем о повторе, но НЕ удаляем
+            log_msg = (
+                f"ℹ️ <b>Анти-повтор (Выключен): Найден повтор поста!</b>\n"
+                f"├ 📌 Тип: <b>{post_type.upper()}</b>\n"
+                f"├ 🔗 Оригинал: <a href='{orig_link}'>Открыть оригинал</a>\n"
+                f"└ 🔗 Дубликат (оставлен): <a href='{dup_link}'>Открыть дубликат</a>"
+            )
+            await send_user_log(user_id, "filtered", log_msg, session_configs)
             return False
 
+    # Если это уникальный пост — сохраняем его в базу данных
     def _insert_record():
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
