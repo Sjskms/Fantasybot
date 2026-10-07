@@ -287,9 +287,17 @@ async def forward_single_message(
                 t_hash = get_text_hash(txt_to_check)
                 if t_hash:
                     is_duplicate = await process_and_clean_duplicate(
-                        client=client, chat_id=target_chat_id, message_id=sent_msg.id,
-                        user_id=user_id, post_type="text", current_hash=t_hash, session_configs=full_config
-                    )
+                          client=client,
+                          target_chat_id=target_chat_id,
+                          source_chat_id=source_chat_id,
+                          source_title=source_title,
+                          source_message_id=message.id,
+                          sent_message_id=sent_msg.id,
+                          user_id=user_id,
+                          post_type="text", # или photo / video
+                          current_hash=t_hash,
+                          session_configs=full_config
+                         )
             elif message.photo:
                 try:
                     file_in_mem = io.BytesIO()
@@ -297,18 +305,35 @@ async def forward_single_message(
                     img_hash = calculate_average_hash(file_in_mem.getvalue())
                     if img_hash:
                         is_duplicate = await process_and_clean_duplicate(
-                            client=client, chat_id=target_chat_id, message_id=sent_msg.id,
-                            user_id=user_id, post_type="photo", current_hash=img_hash, session_configs=full_config
-                        )
+                          client=client,
+                          target_chat_id=target_chat_id,
+                          source_chat_id=source_chat_id,
+                          source_title=source_title,
+                          source_message_id=message.id,
+                          sent_message_id=sent_msg.id,
+                          user_id=user_id,
+                          post_type="photo", # или photo / video
+                          current_hash=t_hash,
+                          session_configs=full_config
+                         )
                 except Exception as e:
                     logger.debug(f"Не удалось проверить дубликат фото: {e}")
             elif message.video:
                 video = message.video
                 meta_info = f"{video.file_size}_{video.duration}"
+                
                 is_duplicate = await process_and_clean_duplicate(
-                    client=client, chat_id=target_chat_id, message_id=sent_msg.id,
-                    user_id=user_id, post_type="video", current_hash=video.file_unique_id, meta_info=meta_info, session_configs=full_config
-                )
+                client=client,
+                target_chat_id=target_chat_id,
+                source_chat_id=source_chat_id,
+                source_title=source_title,
+                source_message_id=message.id,
+                sent_message_id=sent_msg.id,
+                user_id=user_id,
+                post_type="video", # или photo / video
+                current_hash=t_hash,
+                session_configs=full_config
+            )
 
             if is_duplicate:
                 return
