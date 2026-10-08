@@ -196,28 +196,30 @@ async def process_and_clean_duplicate(
                 break
 
     if is_duplicate:
-        # 1. Ссылка на оригинал в источнике
+        # 1. Оригинал изначального источника (где этот контент вышел первый раз)
         orig_link = _make_link(original_source_chat, original_msg_id)
-        # 2. Ссылка на ранее опубликованный пост в канале постинга
+        
+        # 2. Ранее публиковался в канале постинга
         prev_link = _make_link(target_chat_id, prev_published_msg_id) if prev_published_msg_id else "#"
-        # 3. Ссылка на новый дубликат
-        dup_link = _make_link(target_chat_id, sent_message_id)
+        
+        # 3. Новый повтор из канала для экспорта (откуда сейчас прилетела копия)
+        new_source_link = _make_link(source_chat_id, source_message_id)
 
         antidup_enabled = await is_antidup_enabled_for_user(user_id)
         from services.forwarder.engine import send_user_log
 
         if antidup_enabled:
             try:
+                # Удаляем дубликат из канала постинга
                 await client.delete_messages(chat_id=target_chat_id, message_ids=sent_message_id)
                 logger.info("🛡 Анти-повтор: удален дубликат в канале %s", target_chat_id)
 
                 log_msg = (
                     f"⚠️ <b>Анти-повтор: Обнаружен и удален дубликат!</b>\n"
                     f"├ 📌 Тип: <b>{post_type.upper()}</b>\n"
-                    f"├ 📤 Из источника: <b>{source_title}</b>\n"
-                    f"├ 🔗 <b>1. Оригинал в источнике:</b> <a href='{orig_link}'>Открыть оригинал</a>\n"
+                    f"├ 🔗 <b>1. Оригинал источника:</b> <a href='{orig_link}'>Открыть оригинал</a>\n"
                     f"├ 🔗 <b>2. Ранее публиковался:</b> <a href='{prev_link}'>Открыть прошлый пост</a>\n"
-                    f"└ 🗑 <b>3. Удаленный дубликат:</b> <a href='{dup_link}'>Посмотреть пост</a>"
+                    f"└ 📤 <b>3. Новый повтор из канала:</b> <a href='{new_source_link}'>{source_title}</a>"
                 )
                 await send_user_log(user_id, "success", log_msg, session_configs)
                 return True
@@ -228,15 +230,14 @@ async def process_and_clean_duplicate(
             log_msg = (
                 f"ℹ️ <b>Анти-повтор (Выключен): Найден повтор!</b>\n"
                 f"├ 📌 Тип: <b>{post_type.upper()}</b>\n"
-                f"├ 📤 Из источника: <b>{source_title}</b>\n"
-                f"├ 🔗 <b>1. Оригинал в источнике:</b> <a href='{orig_link}'>Открыть оригинал</a>\n"
+                f"├ 🔗 <b>1. Оригинал источника:</b> <a href='{orig_link}'>Открыть оригинал</a>\n"
                 f"├ 🔗 <b>2. Ранее публиковался:</b> <a href='{prev_link}'>Открыть прошлый пост</a>\n"
-                f"└ 🔗 <b>3. Новый дубликат (оставлен):</b> <a href='{dup_link}'>Открыть дубликат</a>"
+                f"└ 📤 <b>3. Новый повтор из канала:</b> <a href='{new_source_link}'>{source_title}</a> (оставлен)"
             )
             await send_user_log(user_id, "filtered", log_msg, session_configs)
             return False
 
-    # Если пост уникальный — сохраняем с указанием ID целевого сообщения
+    # Если пост уникальный — сохраняем в базу
     def _insert_record():
         init_duplicate_db()
         conn = sqlite3.connect(DB_PATH)
