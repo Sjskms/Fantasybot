@@ -8,7 +8,7 @@ import sqlite3
 from PIL import Image
 
 from database import Database
-from services.config_service import read_full_config
+from services.access_service import check_user_access
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,6 @@ def init_duplicate_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS channel_posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,7 +35,6 @@ def init_duplicate_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_antidup_settings (
             user_id INTEGER PRIMARY KEY,
@@ -48,17 +46,10 @@ def init_duplicate_db():
 
 
 async def is_antidup_enabled_for_user(user_id: int) -> bool:
-    """Проверяет, включена ли функция у пользователя."""
-    config = read_full_config()
-    mode = config.get("anti_duplicate_mode", "all")
-
-    if mode == "off":
+    """Проверяет, разрешена ли функция настройками доступа и включена ли пользователем."""
+    has_access, _ = await check_user_access(user_id, "antidup")
+    if not has_access:
         return False
-
-    if mode == "premium":
-        is_prem = await Database.is_premium_active(user_id)
-        if not is_prem:
-            return False
 
     def _check_db():
         init_duplicate_db()
@@ -141,9 +132,8 @@ async def process_and_clean_duplicate(
     session_configs: dict,
     meta_info: str = ""
 ) -> bool:
-    """Проверяет пост на дубликат, формирует отчет с тремя ссылками и удаляет повтор при включенном режиме."""
-    config = read_full_config()
-    threshold = config.get("anti_duplicate_hamming_threshold", DEFAULT_HAMMING_THRESHOLD)
+    """Проверяет пост на дубликат с учетом доступа из access_service."""
+    threshold = DEFAULT_HAMMING_THRESHOLD
 
     def _fetch_records():
         init_duplicate_db()
@@ -196,13 +186,8 @@ async def process_and_clean_duplicate(
                 break
 
     if is_duplicate:
-        # 1. Оригинал изначального источника (где этот контент вышел первый раз)
         orig_link = _make_link(original_source_chat, original_msg_id)
-        
-        # 2. Ранее публиковался в канале постинга
         prev_link = _make_link(target_chat_id, prev_published_msg_id) if prev_published_msg_id else "#"
-        
-        # 3. Новый повтор из канала для экспорта (откуда сейчас прилетела копия)
         new_source_link = _make_link(source_chat_id, source_message_id)
 
         antidup_enabled = await is_antidup_enabled_for_user(user_id)
@@ -210,7 +195,6 @@ async def process_and_clean_duplicate(
 
         if antidup_enabled:
             try:
-                # Удаляем дубликат из канала постинга
                 await client.delete_messages(chat_id=target_chat_id, message_ids=sent_message_id)
                 logger.info("🛡 Анти-повтор: удален дубликат в канале %s", target_chat_id)
 
@@ -237,7 +221,6 @@ async def process_and_clean_duplicate(
             await send_user_log(user_id, "filtered", log_msg, session_configs)
             return False
 
-    # Если пост уникальный — сохраняем в базу
     def _insert_record():
         init_duplicate_db()
         conn = sqlite3.connect(DB_PATH)

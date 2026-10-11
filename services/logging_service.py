@@ -26,7 +26,7 @@ DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
     "telegram_log_chat_id": None,
     "file_cleanup_period": "1_week",
     "events": {
-        "new_user": True,
+        "new_user": True,        #новый пользователь
         "session_added": True,
         "session_removed": True,
         "forward_success": True,
@@ -36,7 +36,6 @@ DEFAULT_LOGGING_CONFIG: Dict[str, Any] = {
         "forwarding_disabled": True,
         "bot_error": True,
         "other": True,
-        # НАСТРОЙКИ ЛОГИРОВАНИЯ ПЛАТЕЖЕЙ:
         "payment_success": True,        # Успешные зачисления Премиум
         "payment_pending": True,        # Созданные счета и отправленные чеки
         "payment_rejected": True,       # Отклоненные чеки
