@@ -12,15 +12,11 @@ from .state import UserSessionLoggingStates
 
 router = Router()
 
-from html import escape
-from aiogram import F
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.exceptions import TelegramBadRequest
+
 
 from services.access_service import check_user_access
 from database import Database
-# Подставьте правильный путь к вашей клавиатуре настроек логирования:
-from keyboards.logging_kb import get_logging_settings_keyboard
+
 
 
 @router.callback_query(F.data.startswith("session_logging_"))
