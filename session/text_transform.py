@@ -8,19 +8,65 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from database import Database
 from keyboards.session_kb import get_text_transform_keyboard
+from services.access_service import check_user_access
 from .state import TextTransformStates, mode_names
 
 router = Router()
 logger = logging.getLogger(__name__)
 
+
 @router.callback_query(F.data.startswith("text_transform_"))
 async def show_text_transform_menu(callback: CallbackQuery, state: FSMContext = None, session_name: str = None):
+    """Отображает меню настроек текста и ссылок с проверкой прав доступа."""
     if state:
         await state.set_state(None)
+
     user_id = callback.from_user.id
     if not session_name:
         session_name = callback.data.removeprefix("text_transform_")
 
+    # 1. Проверяем права доступа к функции через access_service
+    has_access, reason = await check_user_access(user_id, "text_transform")
+
+    if not has_access:
+        if reason == "off":
+            try:
+                return await callback.answer("⚠️ Настройка текста и ссылок временно отключена администратором.", show_alert=True)
+            except TelegramBadRequest:
+                return
+
+        if reason == "admin":
+            try:
+                return await callback.answer("🔒 Данная функция доступна только администраторам.", show_alert=True)
+            except TelegramBadRequest:
+                return
+
+        if reason == "premium":
+            try:
+                await callback.answer()
+            except TelegramBadRequest:
+                pass
+
+            promo_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⭐ Оформить Premium", callback_data="buy_premium")],
+                [InlineKeyboardButton(text="◀️ Закрыть", callback_data=f"session_config2_{session_name}")]
+            ])
+
+            promo_text = (
+                "⭐ <b>Функция «Текст и ссылки (HTML)» доступна в тарифе Premium!</b>\n\n"
+                "• <b>Замена ссылок:</b> автоматическая замена чужих ссылок и юзернеймов на ваши\n"
+                "• <b>Фильтрация текста:</b> удаление или замена запрещенных слов и фраз\n"
+                "• <b>Кастомные подписи:</b> добавление ваших рекламных текстов и кнопок к каждому посту\n"
+                "• <b>HTML-форматирование:</b> жирный текст, курсив, скрытые ссылки и цитаты\n\n"
+                "Оформите подписку, чтобы полностью брендировать ваши каналы:"
+            )
+
+            try:
+                return await callback.message.edit_text(promo_text, reply_markup=promo_kb, parse_mode="HTML")
+            except TelegramBadRequest:
+                return
+
+    # 2. Если доступ разрешен — открываем меню управления текстом
     try:
         session_configs = await Database.get_session_configs(user_id, session_name) or {}
         tt_cfg = session_configs.get("text_transform", {})
@@ -43,7 +89,12 @@ async def show_text_transform_menu(callback: CallbackQuery, state: FSMContext = 
     except Exception as e:
         logger.exception(f"Ошибка в show_text_transform_menu: {e}")
     finally:
-        await callback.answer()
+        try:
+            await callback.answer()
+        except TelegramBadRequest:
+            pass
+        
+        
 
 @router.callback_query(F.data.startswith("tt_mode_"))
 async def change_transform_mode(callback: CallbackQuery):
