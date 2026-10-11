@@ -58,11 +58,11 @@ def build_admin_limits_keyboard(config: dict) -> InlineKeyboardMarkup:
     ])
     rows.append([
         InlineKeyboardButton(
-            text=f"⭐ 📤 Экспорт: {config.get('premium_max_export_channels_per_session', 50)}",
+            text=f"⭐ 📤 Экспорт (Prem): {config.get('premium_max_export_channels_per_session', 50)}",
             callback_data="adm_lim:edit:premium_max_export_channels_per_session",
         ),
         InlineKeyboardButton(
-            text=f"⭐ 📥 Постинг: {config.get('premium_max_post_channels_per_session', 25)}",
+            text=f"⭐ 📥 Постинг (Prem): {config.get('premium_max_post_channels_per_session', 25)}",
             callback_data="adm_lim:edit:premium_max_post_channels_per_session",
         ),
     ])

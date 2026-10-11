@@ -29,16 +29,66 @@ from services.duplicate_detector import (
     calculate_average_hash, 
 )
 
+from services.access_service import check_user_access
+
+
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from services.access_service import check_user_access
+from services.duplicate_detector import is_antidup_enabled_for_user, set_user_antidup_status
+# Импортируйте вашу клавиатуру управления сессией (например, get_session_management_keyboard)
+from keyboards.session_kb import get_session_management_keyboard
+from database import Database
+
 
 @router.callback_query(F.data.startswith("toggle_antidup_"))
 async def toggle_user_antidup(callback: CallbackQuery):
+    """Переключает статус функции 'Анти-повтор' с проверкой прав доступа."""
     user_id = callback.from_user.id
+    session_name = callback.data.removeprefix("toggle_antidup_")
+
+    # 1. Проверяем права доступа по configuration/access.json
+    has_access, reason = await check_user_access(user_id, "antidup")
+
+    if not has_access:
+        if reason == "off":
+            return await callback.answer("⚠️ Функция временно отключена администратором.", show_alert=True)
+        
+        if reason == "admin":
+            return await callback.answer("🔒 Данная функция доступна только администраторам.", show_alert=True)
+
+        if reason == "premium":
+            promo_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⭐ Оформить Premium", callback_data="buy_premium")],
+                [InlineKeyboardButton(text="◀️ Закрыть", callback_data=f"session_config_{session_name}")]
+            ])
+            return await callback.message.edit_text(
+                "⭐ <b>Функция «Анти-повтор» доступна в тарифе Premium!</b>\n\n"
+                "• Автоматическое распознавание и удаление дублей (фото, видео, текст)\n"
+                "• Защита каналов от повторяющихся постов из разных источников\n"
+                "• Подробные отчеты с ссылками на оригинал и повтор\n\n"
+                "Оформите подписку, чтобы включить функцию в один клик:",
+                reply_markup=promo_kb,
+                parse_mode="HTML"
+            )
+
+    # 2. Если доступ разрешен — переключаем состояние тумблера
     current_status = await is_antidup_enabled_for_user(user_id)
     new_status = not current_status
     await set_user_antidup_status(user_id, new_status)
-    
-    await callback.answer(f"Анти-повтор успешно {'включен' if new_status else 'выключен'}!", show_alert=True)
-    
+
+    # 3. Обновляем клавиатуру сессии, чтобы сразу сменился смайлик 🟢/🔴
+    enable_posting = await Database.get_session_posting_status(user_id, session_name)
+    new_kb = await get_session_management_keyboard(session_name, enable_posting, user_id=user_id)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=new_kb)
+    except Exception:
+        pass
+
+    status_text = "включен 🟢" if new_status else "выключен 🔴"
+    await callback.answer(f"Анти-повтор успешно {status_text}!")
+
     
     
     
@@ -51,11 +101,9 @@ async def start_handler(message: types.Message):
         user_username = message.from_user.username
         registration_date = datetime.datetime.now().isoformat()
 
-        # Проверяем, новый ли это пользователь
         if not await Database.user_exists(user_id):
             await Database.add_user(user_id, user_full_name, user_username, registration_date)
             
-            # Логируем регистрацию нового пользователя с передачей user_id для блока админа
             username_str = f"@{user_username}" if user_username else "не задан"
             await log_event(
                 "new_user",
@@ -95,7 +143,6 @@ async def main_menu_callback_handler(callback_query: CallbackQuery):
         
         is_admin = await check_is_admin(user_id)
         
-        # ИСПРАВЛЕНИЕ: Аналогично исправлен подсчет сессий через Database.get_user_sessions
         user_sessions = await Database.get_user_sessions(user_id)
         session_count = len(user_sessions) if user_sessions else 0
 
@@ -125,7 +172,7 @@ async def main_menu_callback_handler(callback_query: CallbackQuery):
 
 @router.callback_query(F.data == "profile")
 async def profile_callback_handler(callback_query: CallbackQuery):
-    """Раздел Профиль с расширенной статистикой лимитов сессий, каналов и статусом пересылки."""
+    """Раздел Профиль."""
     try:
         user_id = callback_query.from_user.id
         user_data = await Database.get_user(user_id)

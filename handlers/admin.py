@@ -1,61 +1,33 @@
-# handlers/admin.py
 import asyncio
 import logging
 import os
 from html import escape
-from typing import Optional
 
-from aiogram import Bot, F, Router, types
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (
-    CallbackQuery,
-    FSInputFile,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from database import Database
 from keyboards import admin_kb
-from my_filters.admin_filter import IsAdmin, IsSuperAdmin
+from my_filters.admin_filter import IsAdmin
+from services.config_service import read_full_config, update_limit_in_config
 from services.logging_service import (
     LOG_FILE_PATH,
     cleanup_log_file,
-    get_cached_logging_config,
     load_global_logging_config,
     save_global_logging_config,
 )
+from states.admin_states import BroadcastStates, LoggingManageStates
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 
-# --- СОСТОЯНИЯ FSM ДЛЯ РАССЫЛКИ, УПРАВЛЕНИЯ И ЛОГИРОВАНИЯ ---
-class BroadcastStates(StatesGroup):
-    waiting_for_initial_content = State()
-    preview_menu = State()
-    waiting_for_text = State()
-    waiting_for_media = State()
-    waiting_for_buttons = State()
-
-
-class AdminManageStates(StatesGroup):
-    waiting_for_add_admin_id = State()
-    waiting_for_remove_admin_id = State()
-
-
-class LoggingManageStates(StatesGroup):
-    waiting_for_log_chat_id = State()
-
-
-# --- КОМАНДЫ ДЛЯ АДМИНИСТРАТОРА ---
-
 @router.message(Command("admin", "adm"), IsAdmin())
 async def cmd_admin_menu(message: Message, state: FSMContext):
-    """Открывает главное меню администратора по команде /admin или /adm."""
+    """Открывает главное меню панели администратора."""
     await state.clear()
     await message.answer(
         "👑 <b>Панель администратора</b>",
@@ -63,159 +35,47 @@ async def cmd_admin_menu(message: Message, state: FSMContext):
         parse_mode="HTML",
     )
 
-# Пример: /grant_premium 7916504148 30 (выдать на 30 дней)
-@router.message(Command("grant_premium"),IsAdmin())
+
+@router.message(Command("grant_premium"), IsAdmin())
 async def admin_grant_premium(message: Message):
-    
+    """Выдает пользователю Premium-подписку на указанное число дней."""
     parts = message.text.split()
     if len(parts) < 3:
         return await message.answer("Использование: `/grant_premium <user_id> <дни>`", parse_mode="Markdown")
 
     target_user_id = int(parts[1])
     days = int(parts[2])
-
     end_date_str = await Database.add_premium(target_user_id, days)
-    await message.answer(f"✅ Премиум для <code>{target_user_id}</code> успешно выдан до <b>{end_date_str}</b>!", parse_mode="HTML")
-    
-    
-    
-# --- КЛАВИАТУРЫ ДЛЯ МЕНЮ ЛОГИРОВАНИЯ ---
-
-EVENT_TITLES = {
-    "new_user": "👤 Новый пользователь",
-    "session_added": "📥 Добавлена сессия",
-    "session_removed": "🗑 Удалена сессия",
-    "forward_success": "✅ Успешная пересылка",
-    "forward_filtered": "ℹ️ Отфильтрованное сообщение",
-    "forward_error": "⚠️ Ошибка отправки",
-    "forwarding_enabled": "🟢 Пересылка включена",
-    "forwarding_disabled": "🔴 Пересылка выключена",
-    "bot_error": "❌ Ошибка в боте",
-
-    # НОВЫЕ ТУМБЛЕРЫ ОПЛАТЫ:
-    "payment_success": "💰 Успешная оплата",
-    "payment_pending": "⏳ Создан счет / отправлен чек",
-    "payment_rejected": "❌ Отклоненный платеж",
-    "payment_cryptobot": "🤖 Логировать CryptoBot",
-    "payment_card": "💳 Логировать Карты РФ",
-    "payment_only_unpaid": "⚠️ Логировать ТОЛЬКО незавершенные",
-
-    "other": "📝 Другое логирование",
-}
-
-
-def get_logging_main_kb(cfg: dict) -> InlineKeyboardMarkup:
-    """Главное меню настроек логирования."""
-    bot_log_icon = "✅" if cfg.get("bot_logging", True) else "❌"
-    tg_log_icon = "✅" if cfg.get("telegram_logging", True) else "❌"
-    con_log_icon = "✅" if cfg.get("console_logging", True) else "❌"
-    file_log_icon = "✅" if cfg.get("file_logging", True) else "❌"
-
-    chat_id_val = cfg.get("telegram_log_chat_id")
-    # Изменено: вместо 'Все админы' пишем 'Админу'
-    chat_display = str(chat_id_val) if chat_id_val else "Админу"
-
-    period_map = {
-        "1_day": "1 день",
-        "3_days": "3 дня",
-        "1_week": "1 неделя",
-        "2_weeks": "2 недели",
-        "1_month": "1 месяц",
-        "never": "Не удалять",
-    }
-    period_str = period_map.get(cfg.get("file_cleanup_period", "1_week"), "1 неделя")
-
-    keyboard = [
-        [InlineKeyboardButton(text=f"Логирование бота: {bot_log_icon}", callback_data="toggle_glog_bot_logging")],
-        [InlineKeyboardButton(text=f"Логирование в телеграм: {tg_log_icon}", callback_data="toggle_glog_telegram_logging")],
-        [InlineKeyboardButton(text=f"Логирование в консоль: {con_log_icon}", callback_data="toggle_glog_console_logging")],
-        [InlineKeyboardButton(text=f"Логирование в файл: {file_log_icon}", callback_data="toggle_glog_file_logging")],
-        [InlineKeyboardButton(text=f"🎯 Куда слать в TG: {chat_display}", callback_data="settings_log_chat_prompt")],
-        [InlineKeyboardButton(text=f"📁 Очистка файла: {period_str}", callback_data="settings_log_cleanup_menu")],
-        [InlineKeyboardButton(text="📥 Выгрузить файл логов", callback_data="download_log_file")],
-        [InlineKeyboardButton(text="⚙️ Настроить события логирования", callback_data="settings_logging_events")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="settings")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
+    await message.answer(
+        f"✅ Премиум для <code>{target_user_id}</code> успешно выдан до <b>{end_date_str}</b>!",
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data == "admin_antidup_mode", IsAdmin())
 async def admin_antidup_menu(callback: CallbackQuery):
+    """Отображает меню выбора глобального режима функции Анти-повтор."""
     config = read_full_config()
     mode = config.get("anti_duplicate_mode", "all")
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{'🟢 ' if mode == 'all' else ''}Доступно всем", callback_data="set_ad_mode:all")],
-        [InlineKeyboardButton(text=f"{'⭐ ' if mode == 'premium' else ''}Только Premium", callback_data="set_ad_mode:premium")],
-        [InlineKeyboardButton(text=f"{'🔴 ' if mode == 'off' else ''}Отключить полностью", callback_data="set_ad_mode:off")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")]
-    ])
-    await callback.message.edit_text("⚙️ <b>Глобальный режим функции «Анти-повтор»</b>", reply_markup=kb, parse_mode="HTML")
-
-@router.callback_query(F.data.startswith("set_ad_mode:"), IsAdmin())
-async def set_admin_antidup_mode(callback: CallbackQuery):
-    new_mode = callback.data.split(":")[1]
-    config = read_full_config()
-    config["anti_duplicate_mode"] = new_mode
-    update_limit_in_config("anti_duplicate_mode", new_mode) # Сохранение в JSON
-    await callback.answer("Режим анти-повтора обновлен!", show_alert=True)
-    await admin_antidup_menu(callback)
-    
-    
-    
-
-def get_cleanup_period_kb() -> InlineKeyboardMarkup:
-    """Клавиатура выбора срока хранения логов в файле."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="1 день", callback_data="set_clean_1_day"),
-                InlineKeyboardButton(text="3 дня", callback_data="set_clean_3_days"),
-            ],
-            [
-                InlineKeyboardButton(text="1 неделя", callback_data="set_clean_1_week"),
-                InlineKeyboardButton(text="2 недели", callback_data="set_clean_2_weeks"),
-            ],
-            [
-                InlineKeyboardButton(text="1 месяц", callback_data="set_clean_1_month"),
-                InlineKeyboardButton(text="Не удалять", callback_data="set_clean_never"),
-            ],
-            [
-                InlineKeyboardButton(text="🔥 Удалить прямо сейчас", callback_data="set_clean_delete_now"),
-            ],
-            [
-                InlineKeyboardButton(text="◀️ Назад к логированию", callback_data="settings_logging"),
-            ],
-        ]
+    await callback.message.edit_text(
+        "⚙️ <b>Глобальный режим функции «Анти-повтор»</b>",
+        reply_markup=admin_kb.get_antidup_admin_kb(mode),
+        parse_mode="HTML",
     )
 
 
-def get_logging_events_kb(cfg: dict) -> InlineKeyboardMarkup:
-    """Подменю детальной настройки событий логирования."""
-    events_cfg = cfg.get("events", {})
-    keyboard = []
+@router.callback_query(F.data.startswith("set_ad_mode:"), IsAdmin())
+async def set_admin_antidup_mode(callback: CallbackQuery):
+    """Сохраняет выбранный глобальный режим работы Анти-повтора."""
+    new_mode = callback.data.split(":")[1]
+    update_limit_in_config("anti_duplicate_mode", new_mode)
+    await callback.answer("Режим анти-повтора обновлен!", show_alert=True)
+    await admin_antidup_menu(callback)
 
-    for event_key, title in EVENT_TITLES.items():
-        is_on = events_cfg.get(event_key, True)
-        icon = "✅" if is_on else "❌"
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"{title}: {icon}",
-                callback_data=f"toggle_gevt_{event_key}"
-            )
-        ])
-
-    keyboard.append([InlineKeyboardButton(text="◀️ Назад к общим настройкам", callback_data="settings_logging")])
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
-# --- ВЫГРУЗКА ФАЙЛА ЛОГОВ ---
 
 @router.callback_query(F.data == "download_log_file", IsAdmin())
 async def download_log_file_handler(callback_query: CallbackQuery):
-    """Выгружает и отправляет файл bot_events.log администратору."""
+    """Выгружает и отправляет файл системных логов bot_events.log администратору."""
     if not os.path.exists(LOG_FILE_PATH) or os.path.getsize(LOG_FILE_PATH) == 0:
         await callback_query.answer("⚠️ Файл логов пока пуст или еще не создан!", show_alert=True)
         return
@@ -223,11 +83,10 @@ async def download_log_file_handler(callback_query: CallbackQuery):
     try:
         file_to_send = FSInputFile(LOG_FILE_PATH, filename="bot_events.log")
         file_size_kb = round(os.path.getsize(LOG_FILE_PATH) / 1024, 2)
-        
         await callback_query.message.answer_document(
             document=file_to_send,
             caption=f"📄 <b>Файл системных логов бота</b>\n📊 Размер: <code>{file_size_kb} KB</code>",
-            parse_mode="HTML"
+            parse_mode="HTML",
         )
         await callback_query.answer("Логи успешно отправлены!")
     except Exception as e:
@@ -235,16 +94,13 @@ async def download_log_file_handler(callback_query: CallbackQuery):
         await callback_query.answer(f"❌ Ошибка выгрузки: {e}", show_alert=True)
 
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ПАРСИНГ РАССЫЛКИ ---
-
 def parse_buttons_from_text(raw_text: str) -> list[dict]:
-    """Парсит строки формата: Текст - Ссылка."""
+    """Парсит строки текстового шаблона в список Inline-кнопок."""
     buttons = []
     if not raw_text:
         return buttons
 
-    lines = raw_text.strip().splitlines()
-    for line in lines:
+    for line in raw_text.strip().splitlines():
         line = line.strip()
         if not line:
             continue
@@ -273,30 +129,24 @@ def parse_buttons_from_text(raw_text: str) -> list[dict]:
 
 
 async def render_broadcast_preview(chat_id: int, state: FSMContext, bot: Bot):
-    """Отрисовывает сообщение предпросмотра рассылки."""
+    """Отрисовывает интерфейс предпросмотра рассылки перед отправкой."""
     data = await state.get_data()
     text = data.get("text", "")
     media_type = data.get("media_type")
     media_id = data.get("media_id")
     buttons = data.get("buttons") or []
 
-    user_buttons = []
-    for b in buttons:
-        user_buttons.append([InlineKeyboardButton(text=b["text"], url=b["url"])])
-
+    user_buttons = [[InlineKeyboardButton(text=b["text"], url=b["url"])] for b in buttons]
     admin_action_kb = [
         [
             InlineKeyboardButton(text="✏️ Изменить текст", callback_data="bc_edit_text"),
             InlineKeyboardButton(text="🖼 Изменить/добавить медиа", callback_data="bc_edit_media"),
         ],
-        [
-            InlineKeyboardButton(text="🔘 Настроить кнопки", callback_data="bc_edit_buttons"),
-        ],
+        [InlineKeyboardButton(text="🔘 Настроить кнопки", callback_data="bc_edit_buttons")],
     ]
 
     if media_id:
         admin_action_kb.append([InlineKeyboardButton(text="🗑 Удалить медиа", callback_data="bc_remove_media")])
-
     if buttons:
         admin_action_kb.append([InlineKeyboardButton(text="🗑 Удалить все кнопки", callback_data="bc_remove_buttons")])
 
@@ -333,29 +183,11 @@ async def render_broadcast_preview(chat_id: int, state: FSMContext, bot: Bot):
         )
 
 
-# --- РАЗДЕЛ НАСТРОЕК АДМИНИСТРАТОРА ---
 
-@router.callback_query(F.data == "settings_access", IsAdmin())
-async def settings_access_handler(callback_query: CallbackQuery):
-    """Заглушка для раздела доступа."""
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ Назад в настройки", callback_data="settings")],
-        ]
-    )
-    await callback_query.message.edit_text(
-        "⚠️ <b>Данное меню временно недоступно.</b>",
-        reply_markup=kb,
-        parse_mode="HTML",
-    )
-    await callback_query.answer()
-
-
-# --- ХЭНДЛЕРЫ ЛОГИРОВАНИЯ ---
 
 @router.callback_query(F.data == "settings_logging", IsAdmin())
 async def show_logging_main_menu(callback_query: CallbackQuery, state: FSMContext):
-    """Отображение главного меню настроек логирования."""
+    """Отображает главное меню управления параметрами системного логирования."""
     await state.clear()
     cfg = await load_global_logging_config()
     text = (
@@ -363,35 +195,29 @@ async def show_logging_main_menu(callback_query: CallbackQuery, state: FSMContex
         "Здесь вы можете настроить каналы отправки (Telegram, консоль, файл), "
         "указать целевой чат, выгрузить файл или настроить периодичность автоочистки:"
     )
-    await callback_query.message.edit_text(
-        text,
-        reply_markup=get_logging_main_kb(cfg),
-        parse_mode="HTML",
-    )
+    await callback_query.message.edit_text(text, reply_markup=admin_kb.get_logging_main_kb(cfg), parse_mode="HTML")
     await callback_query.answer()
 
 
 @router.callback_query(F.data.startswith("toggle_glog_"), IsAdmin())
 async def toggle_global_logging_option(callback_query: CallbackQuery):
-    """Переключение главных тумблеров логирования."""
+    """Переключает глобальные каналы логирования (Telegram, файл, консоль)."""
     key = callback_query.data.removeprefix("toggle_glog_")
     cfg = await load_global_logging_config()
-
     if key in cfg:
         cfg[key] = not cfg[key]
         await save_global_logging_config(cfg)
 
     try:
-        await callback_query.message.edit_reply_markup(reply_markup=get_logging_main_kb(cfg))
+        await callback_query.message.edit_reply_markup(reply_markup=admin_kb.get_logging_main_kb(cfg))
     except TelegramBadRequest:
         pass
     await callback_query.answer("Настройка обновлена")
 
 
-# --- НАСТРОЙКА ID КАНАЛА/ЧАТА ДЛЯ ЛОГОВ TELEGRAM ---
-
 @router.callback_query(F.data == "settings_log_chat_prompt", IsAdmin())
 async def prompt_log_chat_id(callback_query: CallbackQuery, state: FSMContext):
+    """Запрашивает ID чата/канала для перенаправления Telegram-логов."""
     await state.set_state(LoggingManageStates.waiting_for_log_chat_id)
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -411,6 +237,7 @@ async def prompt_log_chat_id(callback_query: CallbackQuery, state: FSMContext):
 
 @router.message(LoggingManageStates.waiting_for_log_chat_id, IsAdmin())
 async def process_log_chat_id(message: Message, state: FSMContext):
+    """Сохраняет введенный ID чата для системных Telegram-логов."""
     raw_val = (message.text or "").strip()
     try:
         chat_id = int(raw_val)
@@ -421,37 +248,35 @@ async def process_log_chat_id(message: Message, state: FSMContext):
     cfg["telegram_log_chat_id"] = chat_id
     await save_global_logging_config(cfg)
     await state.clear()
-
     await message.answer(
         f"✅ ID для отправки логов установлен: <code>{chat_id}</code>",
-        reply_markup=get_logging_main_kb(cfg),
+        reply_markup=admin_kb.get_logging_main_kb(cfg),
         parse_mode="HTML",
     )
 
 
 @router.callback_query(F.data == "reset_log_chat_id", IsAdmin())
 async def reset_log_chat_id_handler(callback_query: CallbackQuery, state: FSMContext):
+    """Сбрасывает целевой лог-чат обратно на прямую отправку администратору."""
     cfg = await load_global_logging_config()
     cfg["telegram_log_chat_id"] = None
     await save_global_logging_config(cfg)
     await state.clear()
-
     await callback_query.message.edit_text(
         "✅ Получатель сброшен. Логи будут отправляться <b>Админу</b>.",
-        reply_markup=get_logging_main_kb(cfg),
+        reply_markup=admin_kb.get_logging_main_kb(cfg),
         parse_mode="HTML",
     )
     await callback_query.answer()
 
 
-# --- НАСТРОЙКА ПЕРИОДИЧНОСТИ ОЧИСТКИ ФАЙЛА ЛОГОВ ---
-
 @router.callback_query(F.data == "settings_log_cleanup_menu", IsAdmin())
 async def show_cleanup_period_menu(callback_query: CallbackQuery):
+    """Отображает меню выбора периода ротации файла bot_events.log."""
     await callback_query.message.edit_text(
         "📁 <b>Настройка автоочистки текстового файла логов</b> (<code>bot_events.log</code>):\n\n"
         "Выберите, через сколько дней удалять старые записи:",
-        reply_markup=get_cleanup_period_kb(),
+        reply_markup=admin_kb.get_cleanup_period_kb(),
         parse_mode="HTML",
     )
     await callback_query.answer()
@@ -459,6 +284,7 @@ async def show_cleanup_period_menu(callback_query: CallbackQuery):
 
 @router.callback_query(F.data.startswith("set_clean_"), IsAdmin())
 async def set_cleanup_period_option(callback_query: CallbackQuery):
+    """Применяет период ротации или производит немедленную очистку файла логов."""
     option = callback_query.data.removeprefix("set_clean_")
     cfg = await load_global_logging_config()
 
@@ -473,19 +299,18 @@ async def set_cleanup_period_option(callback_query: CallbackQuery):
 
     await callback_query.message.edit_text(
         "📜 <b>Управление логированием системы</b>",
-        reply_markup=get_logging_main_kb(cfg),
+        reply_markup=admin_kb.get_logging_main_kb(cfg),
         parse_mode="HTML",
     )
 
 
 @router.callback_query(F.data == "settings_logging_events", IsAdmin())
 async def show_logging_events_menu(callback_query: CallbackQuery):
-    """Отображение меню детальных событий логирования."""
+    """Отображает подменю тумблеров категорий логируемых событий."""
     cfg = await load_global_logging_config()
-    text = "⚙️ <b>Детальная настройка событий логирования:</b>\n\nВыберите, какие события фиксировать:"
     await callback_query.message.edit_text(
-        text,
-        reply_markup=get_logging_events_kb(cfg),
+        "⚙️ <b>Детальная настройка событий логирования:</b>\n\nВыберите, какие события фиксировать:",
+        reply_markup=admin_kb.get_logging_events_kb(cfg),
         parse_mode="HTML",
     )
     await callback_query.answer()
@@ -493,30 +318,23 @@ async def show_logging_events_menu(callback_query: CallbackQuery):
 
 @router.callback_query(F.data.startswith("toggle_gevt_"), IsAdmin())
 async def toggle_event_logging_option(callback_query: CallbackQuery):
-    """Переключение конкретного типа события."""
+    """Инвертирует флаг отслеживания конкретного системного события."""
     event_key = callback_query.data.removeprefix("toggle_gevt_")
     cfg = await load_global_logging_config()
     events = cfg.setdefault("events", {})
-
-    if event_key in events:
-        events[event_key] = not events[event_key]
-    else:
-        events[event_key] = False
-
+    events[event_key] = not events.get(event_key, True)
     await save_global_logging_config(cfg)
 
     try:
-        await callback_query.message.edit_reply_markup(reply_markup=get_logging_events_kb(cfg))
+        await callback_query.message.edit_reply_markup(reply_markup=admin_kb.get_logging_events_kb(cfg))
     except TelegramBadRequest:
         pass
     await callback_query.answer("Событие переключено")
 
 
-# --- СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ ---
-
 @router.callback_query(F.data == "stats", IsAdmin())
 async def admin_stats_handler(callback_query: CallbackQuery):
-    """Отображает статистику пользователей."""
+    """Выводит аналитическую сводку по регистрациям пользователей."""
     total_users = await Database.get_total_users()
     users_today = await Database.get_users_registered_today()
     users_week = await Database.get_users_registered_this_week()
@@ -531,20 +349,15 @@ async def admin_stats_handler(callback_query: CallbackQuery):
     )
 
     try:
-        await callback_query.message.edit_text(
-            stats_message,
-            reply_markup=admin_kb.main_menu,
-            parse_mode="HTML",
-        )
+        await callback_query.message.edit_text(stats_message, reply_markup=admin_kb.main_menu, parse_mode="HTML")
     except TelegramBadRequest:
         pass
     await callback_query.answer()
 
 
-# --- КОНФИГУРАТОР И ЗАПУСК РАССЫЛКИ ---
-
 @router.callback_query(F.data == "broadcast", IsAdmin())
 async def admin_broadcast_menu_handler(callback_query: CallbackQuery, state: FSMContext):
+    """Открывает меню выбора сегмента аудитории для рассылки."""
     await state.clear()
     await callback_query.message.edit_text(
         "📢 <b>Выберите целевую аудиторию для рассылки:</b>",
@@ -556,14 +369,9 @@ async def admin_broadcast_menu_handler(callback_query: CallbackQuery, state: FSM
 
 @router.callback_query(F.data.in_({"broadcast_to_users", "broadcast_to_admins"}), IsAdmin())
 async def start_broadcast_flow(callback_query: CallbackQuery, state: FSMContext):
+    """Инициализирует процесс сбора контента для массовой рассылки."""
     target = "users" if callback_query.data == "broadcast_to_users" else "admins"
-    await state.update_data(
-        target=target,
-        text="",
-        media_type=None,
-        media_id=None,
-        buttons=[],
-    )
+    await state.update_data(target=target, text="", media_type=None, media_id=None, buttons=[])
     await state.set_state(BroadcastStates.waiting_for_initial_content)
 
     audience_name = "ВСЕМ пользователям" if target == "users" else "ВСЕМ администраторам"
@@ -577,44 +385,32 @@ async def start_broadcast_flow(callback_query: CallbackQuery, state: FSMContext)
 
 @router.message(BroadcastStates.waiting_for_initial_content, IsAdmin())
 async def process_initial_broadcast_content(message: Message, state: FSMContext, bot: Bot):
+    """Принимает первоначальное сообщение рассылки любого типа."""
     text = message.html_text or ""
-    media_type = None
-    media_id = None
+    media_type, media_id = None, None
 
     if message.photo:
-        media_type = "photo"
-        media_id = message.photo[-1].file_id
+        media_type, media_id = "photo", message.photo[-1].file_id
     elif message.video:
-        media_type = "video"
-        media_id = message.video.file_id
+        media_type, media_id = "video", message.video.file_id
     elif message.animation:
-        media_type = "animation"
-        media_id = message.animation.file_id
+        media_type, media_id = "animation", message.animation.file_id
     elif message.voice:
-        media_type = "voice"
-        media_id = message.voice.file_id
+        media_type, media_id = "voice", message.voice.file_id
     elif message.audio:
-        media_type = "audio"
-        media_id = message.audio.file_id
+        media_type, media_id = "audio", message.audio.file_id
     elif message.document:
-        media_type = "document"
-        media_id = message.document.file_id
+        media_type, media_id = "document", message.document.file_id
 
-    await state.update_data(
-        text=text,
-        media_type=media_type,
-        media_id=media_id,
-    )
+    await state.update_data(text=text, media_type=media_type, media_id=media_id)
     await state.set_state(BroadcastStates.preview_menu)
-
     await message.answer("🔎 <b>Предпросмотр сообщения для рассылки:</b>", parse_mode="HTML")
     await render_broadcast_preview(message.chat.id, state, bot)
 
 
-# --- РЕДАКТИРОВАНИЕ КОНТЕНТА В ПРЕДПРОСМОТРЕ ---
-
 @router.callback_query(F.data == "bc_edit_text", IsAdmin())
 async def prompt_edit_text(callback_query: CallbackQuery, state: FSMContext):
+    """Запрашивает обновленный текст сообщения рассылки."""
     await state.set_state(BroadcastStates.waiting_for_text)
     await callback_query.message.answer(
         "✍️ Введите <b>новый текст</b> для рассылки (поддерживается HTML-разметка):\n\n"
@@ -626,19 +422,20 @@ async def prompt_edit_text(callback_query: CallbackQuery, state: FSMContext):
 
 @router.message(BroadcastStates.waiting_for_text, IsAdmin())
 async def process_edit_text(message: Message, state: FSMContext, bot: Bot):
+    """Обновляет текст рассылки и перерисовывает предпросмотр."""
     new_text = message.html_text or ""
     if new_text.strip() == ".":
         new_text = ""
 
     await state.update_data(text=new_text)
     await state.set_state(BroadcastStates.preview_menu)
-
     await message.answer("✅ Текст обновлен! <b>Обновленный предпросмотр:</b>", parse_mode="HTML")
     await render_broadcast_preview(message.chat.id, state, bot)
 
 
 @router.callback_query(F.data == "bc_edit_media", IsAdmin())
 async def prompt_edit_media(callback_query: CallbackQuery, state: FSMContext):
+    """Запрашивает новый медиафайл для вложения в рассылку."""
     await state.set_state(BroadcastStates.waiting_for_media)
     await callback_query.message.answer(
         "🖼 Отправьте <b>новое медиа</b> (фото, видео, GIF/анимацию, голосовое, аудио или документ):",
@@ -649,39 +446,33 @@ async def prompt_edit_media(callback_query: CallbackQuery, state: FSMContext):
 
 @router.message(BroadcastStates.waiting_for_media, IsAdmin())
 async def process_edit_media(message: Message, state: FSMContext, bot: Bot):
-    media_type = None
-    media_id = None
+    """Прикрепляет новый медиафайл к рассылке."""
+    media_type, media_id = None, None
 
     if message.photo:
-        media_type = "photo"
-        media_id = message.photo[-1].file_id
+        media_type, media_id = "photo", message.photo[-1].file_id
     elif message.video:
-        media_type = "video"
-        media_id = message.video.file_id
+        media_type, media_id = "video", message.video.file_id
     elif message.animation:
-        media_type = "animation"
-        media_id = message.animation.file_id
+        media_type, media_id = "animation", message.animation.file_id
     elif message.voice:
-        media_type = "voice"
-        media_id = message.voice.file_id
+        media_type, media_id = "voice", message.voice.file_id
     elif message.audio:
-        media_type = "audio"
-        media_id = message.audio.file_id
+        media_type, media_id = "audio", message.audio.file_id
     elif message.document:
-        media_type = "document"
-        media_id = message.document.file_id
+        media_type, media_id = "document", message.document.file_id
     else:
         return await message.answer("⚠️ Пожалуйста, пришлите медиафайл (фото, видео, гифку, голосовое или документ).")
 
     await state.update_data(media_type=media_type, media_id=media_id)
     await state.set_state(BroadcastStates.preview_menu)
-
     await message.answer("✅ Медиафайл прикреплен! <b>Обновленный предпросмотр:</b>", parse_mode="HTML")
     await render_broadcast_preview(message.chat.id, state, bot)
 
 
 @router.callback_query(F.data == "bc_remove_media", IsAdmin())
 async def remove_media_handler(callback_query: CallbackQuery, state: FSMContext, bot: Bot):
+    """Удаляет прикрепленный медиафайл из сообщения рассылки."""
     await state.update_data(media_type=None, media_id=None)
     await callback_query.message.answer("🗑 Медиафайл удален! <b>Предпросмотр:</b>", parse_mode="HTML")
     await render_broadcast_preview(callback_query.message.chat.id, state, bot)
@@ -690,6 +481,7 @@ async def remove_media_handler(callback_query: CallbackQuery, state: FSMContext,
 
 @router.callback_query(F.data == "bc_edit_buttons", IsAdmin())
 async def prompt_edit_buttons(callback_query: CallbackQuery, state: FSMContext):
+    """Запрашивает текст разметки для кнопок рассылки."""
     await state.set_state(BroadcastStates.waiting_for_buttons)
     await callback_query.message.answer(
         "🔘 Отправьте кнопки в формате:\n\n"
@@ -703,75 +495,50 @@ async def prompt_edit_buttons(callback_query: CallbackQuery, state: FSMContext):
 
 @router.message(BroadcastStates.waiting_for_buttons, IsAdmin())
 async def process_edit_buttons(message: Message, state: FSMContext, bot: Bot):
+    """Парсит введенные строки и прикрепляет inline-кнопки к рассылке."""
     parsed = parse_buttons_from_text(message.text or "")
-
     if not parsed:
-        await message.answer(
-            "⚠️ Не удалось распознать ни одной правильной кнопки.\n"
-            "Убедитесь, что формат строки: <code>Текст - https://ссылка</code>"
-        )
-        return
+        return await message.answer("⚠️ Не удалось распознать кнопки.\nФормат: <code>Текст - https://ссылка</code>")
 
     await state.update_data(buttons=parsed)
     await state.set_state(BroadcastStates.preview_menu)
-
-    await message.answer(
-        f"✅ Добавлено кнопок: <b>{len(parsed)}</b>. <b>Обновленный предпросмотр:</b>",
-        parse_mode="HTML",
-    )
+    await message.answer(f"✅ Добавлено кнопок: <b>{len(parsed)}</b>. <b>Обновленный предпросмотр:</b>", parse_mode="HTML")
     await render_broadcast_preview(message.chat.id, state, bot)
 
 
 @router.callback_query(F.data == "bc_remove_buttons", IsAdmin())
 async def remove_buttons_handler(callback_query: CallbackQuery, state: FSMContext, bot: Bot):
+    """Очищает все прикрепленные inline-кнопки рассылки."""
     await state.update_data(buttons=[])
     await callback_query.message.answer("🗑 Все кнопки удалены! <b>Предпросмотр:</b>", parse_mode="HTML")
     await render_broadcast_preview(callback_query.message.chat.id, state, bot)
     await callback_query.answer()
 
 
-# --- ЗАПУСК РАССЫЛКИ С ЗАЩИТОЙ ОТ FLOODWAIT ---
-
 @router.callback_query(F.data == "bc_send_now", IsAdmin())
 async def execute_broadcast(callback_query: CallbackQuery, state: FSMContext, bot: Bot):
+    """Выполняет пакетную рассылку подготовленного сообщения с обработкой FloodWait."""
     data = await state.get_data()
     await state.clear()
 
     target = data.get("target", "users")
     text = data.get("text", "")
-    media_type = data.get("media_type")
-    media_id = data.get("media_id")
+    media_type, media_id = data.get("media_type"), data.get("media_id")
     buttons = data.get("buttons") or []
 
     if not text and not media_id:
-        await callback_query.message.answer(
-            "⚠️ Нельзя запустить пустую рассылку без текста и медиа!",
-            reply_markup=admin_kb.main_menu,
-        )
-        return
+        return await callback_query.message.answer("⚠️ Нельзя запустить пустую рассылку!", reply_markup=admin_kb.main_menu)
 
-    user_kb_markup = None
-    if buttons:
-        user_kb_markup = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text=b["text"], url=b["url"])] for b in buttons]
-        )
-
-    if target == "users":
-        recipients = await Database.get_all_user_ids()
-        target_name = "пользователям"
-    else:
-        recipients = await Database.get_all_admin_ids()
-        target_name = "администраторам"
+    user_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=b["text"], url=b["url"])] for b in buttons]) if buttons else None
+    recipients = await Database.get_all_user_ids() if target == "users" else await Database.get_all_admin_ids()
+    target_name = "пользователям" if target == "users" else "администраторам"
 
     await callback_query.message.answer(
         f"🚀 <b>Рассылка {target_name} запущена...</b>\nВсего получателей: <code>{len(recipients)}</code>",
         parse_mode="HTML",
     )
 
-    sent_count = 0
-    blocked_count = 0
-    failed_count = 0
-
+    sent_count, blocked_count, failed_count = 0, 0, 0
     caller_id = callback_query.from_user.id
 
     for uid in recipients:
@@ -781,28 +548,23 @@ async def execute_broadcast(callback_query: CallbackQuery, state: FSMContext, bo
         while True:
             try:
                 if media_type == "photo":
-                    await bot.send_photo(uid, photo=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
+                    await bot.send_photo(uid, photo=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb)
                 elif media_type == "video":
-                    await bot.send_video(uid, video=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
+                    await bot.send_video(uid, video=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb)
                 elif media_type == "animation":
-                    await bot.send_animation(uid, animation=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
+                    await bot.send_animation(uid, animation=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb)
                 elif media_type == "voice":
-                    await bot.send_voice(uid, voice=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
+                    await bot.send_voice(uid, voice=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb)
                 elif media_type == "audio":
-                    await bot.send_audio(uid, audio=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
+                    await bot.send_audio(uid, audio=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb)
                 elif media_type == "document":
-                    await bot.send_document(uid, document=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb_markup)
+                    await bot.send_document(uid, document=media_id, caption=text, parse_mode="HTML", reply_markup=user_kb)
                 else:
-                    await bot.send_message(uid, text, parse_mode="HTML", reply_markup=user_kb_markup)
-
+                    await bot.send_message(uid, text, parse_mode="HTML", reply_markup=user_kb)
                 sent_count += 1
                 break
-
             except TelegramRetryAfter as e:
-                wait_time = e.retry_after + 1
-                logger.warning(f"TelegramFloodWait: пауза {wait_time} секунд при рассылке.")
-                await asyncio.sleep(wait_time)
-
+                await asyncio.sleep(e.retry_after + 1)
             except TelegramAPIError as e:
                 err_str = str(e).lower()
                 if "bot was blocked by the user" in err_str or "user is deactivated" in err_str or "chat not found" in err_str:
@@ -811,7 +573,6 @@ async def execute_broadcast(callback_query: CallbackQuery, state: FSMContext, bo
                     failed_count += 1
                     logger.warning("Ошибка рассылки пользователю %s: %s", uid, e)
                 break
-
             except Exception as e:
                 failed_count += 1
                 logger.warning("Неизвестная ошибка рассылки пользователю %s: %s", uid, e)
@@ -825,22 +586,16 @@ async def execute_broadcast(callback_query: CallbackQuery, state: FSMContext, bo
         f"🚫 Заблокировали бота: <b>{blocked_count}</b>\n"
         f"❌ Ошибок отправки: <b>{failed_count}</b>"
     )
-
     await callback_query.message.answer(result_text, parse_mode="HTML", reply_markup=admin_kb.main_menu)
     await callback_query.answer()
 
 
-# --- НАВИГАЦИЯ ---
-
 @router.callback_query(F.data == "admin_panel", IsAdmin())
 async def back_to_admin_main_menu(callback_query: CallbackQuery, state: FSMContext):
+    """Возвращает администратора в главное меню панели управления."""
     await state.clear()
     try:
-        await callback_query.message.edit_text(
-            "👑 <b>Панель администратора</b>",
-            reply_markup=admin_kb.main_menu,
-            parse_mode="HTML",
-        )
+        await callback_query.message.edit_text("👑 <b>Панель администратора</b>", reply_markup=admin_kb.main_menu, parse_mode="HTML")
     except TelegramBadRequest:
         pass
     await callback_query.answer()
