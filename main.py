@@ -1,109 +1,82 @@
-# main.py
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
-from config import TOKEN, FERNET_KEY
+
+from config import FERNET_KEY, TOKEN
 from database import Database
-from handlers import admin, user,admin_limits
+from handlers import admin, admin_limits, user
 from middlewares.auth import AuthMiddleware
-from services.scheduler import start_scheduler
-from services.logging_service import set_logging_bot_instance, load_global_logging_config, log_event
-
-from session import router as session_router
-
-
-import uvicorn
-
 from payment import router as payment_router
-
-
-
-
-
+from services.duplicate_detector import init_duplicate_db
 from services.forwarder.supervisor import restore_active_forwarders
-# main.py
-import asyncio
-from database import Database
+from services.logging_service import (
+    load_global_logging_config,
+    log_event,
+    set_logging_bot_instance,
+)
+from services.premium_manager import periodic_premium_cleanup
+from services.scheduler import start_scheduler
+from session import router as session_router
+from handlers import admin_access
 
-async def periodic_premium_cleanup():
-    """Фоновая задача: проверяет и очищает истекшие подписки каждые 30 минут."""
-    while True:
-        try:
-            removed_count = await Database.cleanup_expired_premiums()
-            if removed_count > 0:
-                logging.info(f"🧹 Фоновая очистка: удалено {removed_count} истекших Премиум-подписок.")
-        except Exception as e:
-            logging.error(f"Ошибка при очистке Премиумов: {e}")
-        
-        # Пауза 30 минут (1800 секунд)
-        await asyncio.sleep(1800)
-
-    
 
 async def main():
     logging.basicConfig(
-        level=logging.INFO, 
-        format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
     )
-    
+
     bot = Bot(token=TOKEN)
     dp = Dispatcher()
 
     # 1. Загрузка конфигурации логирования и привязка инстанса бота
     await load_global_logging_config()
     set_logging_bot_instance(bot)
-    
-    # 2. Настройка БД
+
+    # 2. Настройка БД и детектора дубликатов
     await Database.setup()
     logging.info("База данных запущена.")
+    init_duplicate_db()
+    logging.info("База данных анти-повтора инициализирована.")
 
-    # 3. Инициализация шифрования
+    # 3. Инициализация шифрования сессий
     Database.setup_encryption(FERNET_KEY)
     logging.info("Шифрование запущено.")
-    
-    # 4. Запуск планировщика
+
+    # 4. Запуск планировщика задач
     await start_scheduler()
     logging.info("Планировщик задач настроен.")
 
     # 5. Восстановление активных юзерботов автопостинга после перезапуска
     await restore_active_forwarders()
     logging.info("Автопостинг восстановлен.")
-    
-    
+
     # 6. Регистрация роутеров
-    #6.1 основа юзер и админам
     dp.include_router(admin.router)
     dp.include_router(user.router)
-    
-    
-    #6.2 работа с сессией
     dp.include_router(session_router)
-    dp.include_router(admin_limits.router) 
-    
-    #6.3 платежки
+    dp.include_router(admin_limits.router)
     dp.include_router(payment_router)
-
+    dp.include_router(admin_access.router)
     logging.info("Зарегистрированы хендлеры.")
-  
-    
-    
-    # 7. Мидлвари
+
+    # 7. Middleware
     dp.message.middleware(AuthMiddleware())
-    
-    # 8. Лог о включении бота
+
+    # 8. Лог успешного включения
     await log_event(
         "other",
-        "✅ <b>Бот успешно запущен и готов к работе!</b>"
+        "✅ <b>Бот успешно запущен и готов к работе!</b>",
     )
-    
-    #9
-    asyncio.create_task(periodic_premium_cleanup())
+
+    # 9. Фоновая проверка и мягкое приведение лимитов при истечении Premium
+    asyncio.create_task(periodic_premium_cleanup(bot))
 
     # 10. Запуск поллинга
-    await bot.delete_webhook(drop_pending_updates=False)    
+    await bot.delete_webhook(drop_pending_updates=False)
     logging.info("Запускаем опрос бота...")
     await dp.start_polling(bot)
 
 
-if __name__ == "__main__": 
+if __name__ == "__main__":
     asyncio.run(main())
