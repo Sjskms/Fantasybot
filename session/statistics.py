@@ -7,16 +7,43 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from database import Database
 from keyboards.session_kb import get_session_stats_keyboard, get_session_detailed_stats_keyboard
+from services.access_service import check_user_access
 from services.forwarder.engine import calculate_session_stats
 
 router = Router()
 CHANNELS_PER_PAGE_STATS = 10
+
 
 @router.callback_query(F.data.startswith("session_stats_") & ~F.data.startswith("session_stats_detailed_"))
 async def session_stats_handler(callback: CallbackQuery):
     session_name = callback.data.removeprefix("session_stats_")
     user_id = callback.from_user.id
 
+    # 1. Проверяем права доступа по ключу "stats"
+    has_access, reason = await check_user_access(user_id, "stats")
+    if not has_access:
+        if reason == "off":
+            return await callback.answer("⚠️ Статистика временно отключена администратором.", show_alert=True)
+
+        if reason == "admin":
+            return await callback.answer("🔒 Статистика доступна только администраторам.", show_alert=True)
+
+        if reason == "premium":
+            promo_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⭐ Оформить Premium", callback_data="buy_premium")],
+                [InlineKeyboardButton(text="◀️ Назад к сессии", callback_data=f"session_config_{session_name}")]
+            ])
+            return await callback.message.edit_text(
+                "⭐ <b>Статистика доступна в тарифе Premium!</b>\n\n"
+                "• Сводная аналитика работы сессии в реальном времени\n"
+                "• Количество пересланных и отфильтрованных публикаций\n"
+                "• Детализированный учёт ошибок отправки по каждому источнику\n\n"
+                "Оформите подписку, чтобы отслеживать показатели ваших сессий:",
+                reply_markup=promo_kb,
+                parse_mode="HTML"
+            )
+
+    # 2. Если доступ открыт — формируем статистику
     session_configs = await Database.get_session_configs(user_id, session_name) or {}
     forwarded, filtered, errors = calculate_session_stats(session_configs)
 
@@ -34,6 +61,7 @@ async def session_stats_handler(callback: CallbackQuery):
         pass
     await callback.answer()
 
+
 @router.callback_query(F.data.startswith("session_stats_detailed_") | F.data.startswith("statspage_"))
 async def session_detailed_stats_handler(callback: CallbackQuery):
     if callback.data.startswith("statspage_"):
@@ -45,6 +73,31 @@ async def session_detailed_stats_handler(callback: CallbackQuery):
         current_page = 1
 
     user_id = callback.from_user.id
+
+    # 1. Проверяем права доступа по ключу "stats"
+    has_access, reason = await check_user_access(user_id, "stats")
+    if not has_access:
+        if reason == "off":
+            return await callback.answer("⚠️ Статистика временно отключена администратором.", show_alert=True)
+
+        if reason == "admin":
+            return await callback.answer("🔒 Статистика доступна только администраторам.", show_alert=True)
+
+        if reason == "premium":
+            promo_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⭐ Оформить Premium", callback_data="buy_premium")],
+                [InlineKeyboardButton(text="◀️ Назад к сессии", callback_data=f"session_config_{session_name}")]
+            ])
+            return await callback.message.edit_text(
+                "⭐ <b>Подробная аналитика доступна в тарифе Premium!</b>\n\n"
+                "• Детализированный отчет по каждому подключенному каналу\n"
+                "• Точный аудит пересылок, фильтров и ошибок в разрезе источников\n\n"
+                "Оформите подписку для полного доступа:",
+                reply_markup=promo_kb,
+                parse_mode="HTML"
+            )
+
+    # 2. Если доступ открыт — выводим список каналов с пагинацией
     session_configs = await Database.get_session_configs(user_id, session_name) or {}
     channels_dict = session_configs.get("channels", {})
 

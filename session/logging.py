@@ -12,18 +12,63 @@ from .state import UserSessionLoggingStates
 
 router = Router()
 
+from html import escape
+from aiogram import F
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
+
+from services.access_service import check_user_access
+from database import Database
+# Подставьте правильный путь к вашей клавиатуре настроек логирования:
+from keyboards.logging_kb import get_logging_settings_keyboard
+
+
 @router.callback_query(F.data.startswith("session_logging_"))
 async def show_logging_settings(callback: CallbackQuery):
+    """Отображает настройки логирования сессии с проверкой прав доступа."""
+    user_id = callback.from_user.id
     session_name = callback.data.removeprefix("session_logging_")
-    session_configs = await Database.get_session_configs(callback.from_user.id, session_name) or {}
-    log_config = session_configs.get("logging", {"enabled": True, "log_success": True, "log_filtered": False, "log_errors": True})
-    
+
+    # 1. Проверяем права доступа по ключу "logs" из configuration/access.json
+    has_access, reason = await check_user_access(user_id, "logs")
+
+    if not has_access:
+        if reason == "off":
+            return await callback.answer("⚠️ Логирование временно отключено администратором.", show_alert=True)
+
+        if reason == "admin":
+            return await callback.answer("🔒 Настройки логирования доступны только администраторам.", show_alert=True)
+
+        if reason == "premium":
+            promo_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⭐ Оформить Premium", callback_data="payment")],
+                [InlineKeyboardButton(text="◀️ Назад к сессии", callback_data=f"session_config_{session_name}")]
+            ])
+            return await callback.message.edit_text(
+                "⭐ <b>Расширенное логирование доступно в тарифе Premium!</b>\n\n"
+                "• Детальная история пересылок и публикаций в реальном времени\n"
+                "• Отслеживание ошибок публикации и причин фильтрации постов\n"
+                "• Уведомления о сбоях и статусах отправки сообщений\n\n"
+                "Оформите подписку, чтобы получить полный контроль над логами сессий:",
+                reply_markup=promo_kb,
+                parse_mode="HTML"
+            )
+
+    # 2. Если доступ есть — открываем панель настроек логирования
+    session_configs = await Database.get_session_configs(user_id, session_name) or {}
+    log_config = session_configs.get(
+        "logging", 
+        {"enabled": True, "log_success": True, "log_filtered": False, "log_errors": True}
+    )
+
     text = f"📜 <b>Настройки логирования для сессии:</b> <code>{escape(session_name)}</code>"
     keyboard = get_logging_settings_keyboard(session_name, log_config)
+
     try:
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except TelegramBadRequest:
         pass
+
     await callback.answer()
 
 @router.callback_query(F.data.startswith("toggle_log_"))
