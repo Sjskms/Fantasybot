@@ -131,87 +131,119 @@ def get_text_transform_keyboard(session_name: str, transform_config: dict) -> In
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from services.duplicate_detector import is_antidup_enabled_for_user
 
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from services.access_service import get_feature_access_mode
+from services.duplicate_detector import is_antidup_enabled_for_user
+
+
 async def get_session_management_keyboard(
     session_name: str,
     enable_posting: bool,
     user_id: int,
 ) -> InlineKeyboardMarkup:
-    """Генерирует клавиатуру управления сессией с динамическим статусом анти-повтора."""
-    
+    """
+    Генерирует клавиатуру управления сессией.
+    Если функция отключена глобально (режим 'off' в configuration/access.json),
+    её кнопка скрывается из меню.
+    """
     toggle_button_text = (
         "⏹ Выключить пересылку"
         if enable_posting
         else "▶️ Запустить пересылку"
     )
 
-    # Проверяем текущий статус анти-повтора для пользователя
-    is_antidup_on = await is_antidup_enabled_for_user(user_id)
-    antidup_icon = "🟢 Вкл" if is_antidup_on else "🔴 Выкл"
+    # Читаем режимы доступа из configuration/access.json
+    text_transform_mode = get_feature_access_mode("text_transform")
+    logs_mode = get_feature_access_mode("logs")
+    stats_mode = get_feature_access_mode("stats")
+    antidup_mode = get_feature_access_mode("antidup")
 
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⚙️ Настройки каналов",
-                    callback_data=f"session_config2_{session_name}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⚙️ Общие фильтры для всех",
-                    callback_data=f"g_filt_{session_name}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✏️ Текст и ссылки (HTML)",
-                    callback_data=f"text_transform_{session_name}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=toggle_button_text,
-                    callback_data=f"toggle_posting_{session_name}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📜 Настройки логов",
-                    callback_data=f"session_logging_{session_name}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📊 Статистика",
-                    callback_data=f"session_stats_{session_name}",
-                )
-            ],
-            [
-               InlineKeyboardButton(
-                    text=f"🔂 Анти-повтор: {antidup_icon}",
-                    callback_data=f"toggle_antidup_{session_name}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📁 Экспорт/Импорт Config", 
-                    callback_data=f"config_sync_{session_name}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="❌ Удалить сессию",
-                    callback_data=f"delete_session_{session_name}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="◀️ Назад к списку сессий",
-                    callback_data="session_settings",
-                )
-            ],
-        ]
-    )
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="⚙️ Настройки каналов",
+                callback_data=f"session_config2_{session_name}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="⚙️ Настроить фильтры для всех",
+                callback_data=f"g_filt_{session_name}",
+            )
+        ],
+    ]
+
+    # Кнопка 'Текст и ссылки (HTML)' скрывается, если режим 'off'
+    if text_transform_mode != "off":
+        buttons.append([
+            InlineKeyboardButton(
+                text="✏️ Текст и ссылки (HTML)",
+                callback_data=f"text_transform_{session_name}",
+            )
+        ])
+
+    # Кнопка запуска/остановки пересылки
+    buttons.append([
+        InlineKeyboardButton(
+            text=toggle_button_text,
+            callback_data=f"toggle_posting_{session_name}",
+        )
+    ])
+
+    # Кнопка 'Настройки логов' скрывается, если режим 'off'
+    if logs_mode != "off":
+        buttons.append([
+            InlineKeyboardButton(
+                text="📜 Настройки логов",
+                callback_data=f"session_logging_{session_name}",
+            )
+        ])
+
+    # Кнопка 'Статистика' скрывается, если режим 'off'
+    if stats_mode != "off":
+        buttons.append([
+            InlineKeyboardButton(
+                text="📊 Статистика",
+                callback_data=f"session_stats_{session_name}",
+            )
+        ])
+
+    # Кнопка 'Анти-повтор' скрывается, если режим 'off'
+    if antidup_mode != "off":
+        is_antidup_on = await is_antidup_enabled_for_user(user_id)
+        antidup_icon = "🟢 Вкл" if is_antidup_on else "🔴 Выкл"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"🔂 Анти-повтор: {antidup_icon}",
+                callback_data=f"toggle_antidup_{session_name}",
+            )
+        ])
+
+    # Служебные кнопки сессии
+    buttons.extend([
+        [
+            InlineKeyboardButton(
+                text="📁 Экспорт/Импорт Config",
+                callback_data=f"config_sync_{session_name}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="❌ Удалить сессию",
+                callback_data=f"delete_session_{session_name}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="◀️ Назад к списку сессий",
+                callback_data="session_settings",
+            )
+        ],
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
     
     
